@@ -161,7 +161,7 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1
 #list-head { display: flex; align-items: center; gap: 0.6em; padding: 0.6em 0.8em 0.3em; }
 #list-head h2 { margin: 0; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
 #list-count { font-size: 0.8em; color: var(--muted); }
-#add { min-height: 30px; font-size: 0.9em; }
+#add, #browse { min-height: 30px; font-size: 0.9em; }
 #alone { margin: 0; padding: 0.1em 0.9em 0.5em; }
 #list { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0 0.4em 0.6em; list-style: none; }
 #list .none { padding: 1.4em 0.8em; text-align: center; border: 1px dashed var(--line-2); border-radius: 10px; margin: 0.4em; }
@@ -185,6 +185,20 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
+/* a library, in the playlist's place */
+#library { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#library[hidden] { display: none; }
+#lib-bar { display: flex; gap: 0.4em; padding: 0.1em 0.8em 0.5em; }
+#lib-who, #lib-q {
+  min-height: 32px; padding: 0.2em 0.8em;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 999px;
+}
+#lib-who { max-width: 40%; }
+#lib-q { flex: 1; min-width: 0; }
+#lib-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 0 0.4em 0.6em; list-style: none; }
+#lib-list .none { padding: 1.4em 0.8em; text-align: center; }
+#lib-list .more { display: flex; justify-content: center; padding: 0.5em; }
+
 /* the emoji picker, and notices */
 #picker {
   position: fixed; z-index: 20; width: 264px; padding: 6px;
@@ -203,6 +217,6 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1
   main { grid-template-columns: minmax(0, 1fr); }
   main[data-tab="chat"] #side, main[data-tab="side"] #chat { display: none; }
   #side { border-left: 0; }
-  #msg { font-size: 16px; }   /* prevent iOS zoom-on-focus */
+  #msg, #lib-q { font-size: 16px; }   /* prevent iOS zoom-on-focus */
   #me { display: none; }
 }

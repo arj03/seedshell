@@ -575,6 +575,7 @@ try {
 const ASK_CAST = 1, ASK_TELL = 2, RENDER_FRAME = 1;   // the pipe's asks, and its render
 /** A pipe frame: [room 32][body]. */
 const pipeFrame = (room, ...body) => concat(fromHex(room), ...body);
+let jamA = null;   // A's handle into its jam app's guest
 try {
   const jam = authorBundle(sodium, authorA, { ...readAppSource(appDir("jam-app"), guestOpFraming), version: 1 });
   const JAM_PROTO = jam.manifest.protocols[0];
@@ -585,7 +586,7 @@ try {
   assert(jam.manifest.guest.config.protocols[0] === JAM_PROTO, "the builder tells a guest the protocols its app claims");
   const jamRenders = [];
   consent(jam.blob);
-  const jamA = await A.install(jam.blob);
+  jamA = await A.install(jam.blob);
   consent(jam.blob);
   const jamB = await B.install(jam.blob, { onInbound: (claim, from, answer) => { if (answer.length > 0) jamRenders.push(new Uint8Array(answer)); } });
   assert(A.resolve(JAM_PROTO) === jamA.manifest.app && A.resolve(CHAT_PROTO) === chatKey,
@@ -662,6 +663,42 @@ try {
   assert(frames[0].frame === toHex(cast) && frames[1].frame === toHex(tell), "a cast and a tell arrive byte for byte, under the app's own protocol");
   ok("the room pipe is a guest whole: cast and tell scoped to a room, with no guest code of the app's own");
 } catch (err) { fail("the room pipe on its own", err); }
+
+// 8c. the radio app (assembly/radio-app): another bundle, under another label, that claims
+//     the protocol jam claims. It has no view, since what stands in front of its guest is a
+//     program on a node with no page (node/shell.mjs), and its guest is jam's own. A claim
+//     has one holder, so on B it stands where jam stood, and what A's jam casts reaches it:
+//     two apps, one protocol.
+try {
+  const radio = authorBundle(sodium, authorA, { ...readAppSource(appDir("radio-app"), guestOpFraming), version: 1 });
+  const facts = appFacts(radio.manifest);
+  const JAM_PROTO = jamA.manifest.protocols[0];
+  assert(radio.manifest.app !== jamA.manifest.app && radio.manifest.protocols.length === 1 && radio.manifest.protocols[0] === JAM_PROTO,
+    "the radio is another app, claiming jam's protocol");
+  assert(facts.ui === null && facts.requires.length === 1 && facts.requires[0] === NET_PROTO && radio.manifest.modules.length === 0,
+    "the radio has no view and no module, and reaches the network and nothing else");
+  consent(radio.blob);
+  let refused = false;
+  try { await B.install(radio.blob); } catch { refused = true; }
+  assert(refused && B.resolve(JAM_PROTO) === jamA.manifest.app, "a second app claiming jam's protocol is refused while jam holds it");
+  const radioHeard = [];
+  consent(radio.blob);
+  const radioB = await B.install(radio.blob, {
+    replaces: jamA.manifest.app,
+    onInbound: (claim, from, answer) => { if (answer.length > 0) radioHeard.push(new Uint8Array(answer)); },
+  });
+  assert(B.resolve(JAM_PROTO) === radio.manifest.app, "the radio holds jam's claim once it stands in jam's place");
+  await radioB.invoke(writeOp(APP_OP_CONTEXT, contextOf(peerB, [roomWith(ROOM, peerA)], [peerA])));
+  const doc = pipeFrame(ROOM, [1], utf8('{"hello":true}'));
+  await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_CAST], doc)));
+  await until(() => radioHeard.length >= 1, 4000, "the radio's frame");
+  assert(radioHeard[0][0] === RENDER_FRAME && toHex(radioHeard[0].slice(1, 33)) === peerA && toHex(radioHeard[0].slice(33)) === toHex(doc),
+    "what jam casts reaches the radio's guest, and is passed to whatever is in front of it");
+  const block = utf8("a block, whichever app names it");
+  const named = (app) => app.invoke(writeOp(APP_OP_UI, concat([3], block)));
+  assert(toHex(await named(radioB)) === toHex(await named(jamA)), "the radio names a block as jam does");
+  ok("the radio app: another bundle, with no view, takes jam's claim and speaks its protocol");
+} catch (err) { fail("radio app", err); }
 
 // 9. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
 // bundle is installed on one click of a row showing a name and an author, so the reach it

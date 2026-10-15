@@ -55,13 +55,21 @@
       </div>
     </div>
     <div id="list-head">
-      <h2>Playlist</h2>
+      <h2 id="list-title">Playlist</h2>
       <span id="list-count"></span>
       <span class="spacer"></span>
+      <button id="browse" type="button" hidden>Library</button>
       <button id="add" type="button">+ Add music</button>
     </div>
     <p id="alone" class="note" hidden></p>
     <ol id="list"></ol>
+    <div id="library" hidden>
+      <div id="lib-bar">
+        <select id="lib-who" aria-label="Whose library" hidden></select>
+        <input id="lib-q" type="search" placeholder="Search" maxlength="160" autocomplete="off" aria-label="Search the library" />
+      </div>
+      <ul id="lib-list"></ul>
+    </div>
     <input id="file" type="file" accept=".flac,.ogg,.oga,audio/flac,audio/ogg" multiple hidden />
   </section>
 </main>
@@ -71,6 +79,7 @@
 
 <script src="../view-lib/app.js"></script>
 <script src="formats.js"></script>
+<script src="room.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

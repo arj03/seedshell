@@ -1,53 +1,18 @@
 // Jam's UI. Loaded into a sandboxed iframe by the shell.
 //
+// What a room holds, how two nodes' copies of it are brought to agree, and how its audio is
+// cut and served are room.js, which the page names ahead of this file: a member of a room
+// with nothing to show for it. This file is what a person sees and hears of one, and what
+// only a listener does: fetching the audio the room is playing, and sounding it.
+//
 // With the shell (browser/app-api.js) and with this app's guest, through view-lib/app.js,
-// which the page names ahead of this file. The guest is guest-lib/room-pipe.js, and what
-// guest.js adds to it:
+// which the page names first. Beside what room.js asks of the guest:
 //   app.ready()                    this view is listening
 //   app.conv({ room })             the room open, which a call is then with
-//   app.cast(room, ...)            a frame to every linked member of a room
-//   app.tell(room, to, ...)        a frame to one member of it
-//   app.call([3], bytes)           hash: what a block of these bytes is called, answered
 //   app.onContext                  the node's context
 //   app.onFrame                    a peer's frame, from someone in its room
 //   app.onRender                   [2][from 32][room 32][id 32][bytes]: a peer's block,
 //                                  under the id our guest gave it
-//
-// A FRAME names its room, which is the pipe's to read, and then is [type u8][body]. There
-// are four. One carries what the room agrees on; three move audio:
-//   1 DOC    JSON, a part of the room's state (below), or all of it
-//   2 WANT   block ids, 32 bytes each: send me these
-//   3 NACK   block ids: I do not have these
-//   4 BLOCK  the bytes of one block
-//
-// THE ROOM'S STATE is one document, and every change to it is a smaller document of the
-// same shape, merged the same way whoever it comes from and however often:
-//   msgs    [{ by, id, n, at, text }]         added, never changed
-//   reacts  [{ t, e, by, on, n }]             per (target, emoji, peer), the latest `n` wins
-//   tracks  [{ id, by, n, title, codec, rate, ch, size, head, blocks, lens, pre, pos, gone, v, vBy }]
-//                                             what a track is never changes; where it sits
-//                                             (`pos`) goes to the latest (v, vBy), and
-//                                             `gone` once set stays set
-//   play    { v, by, id, pos, on }            what is playing, the latest (v, by) wins
-// `n` and `v` are a clock the room shares: each change takes one more than the highest this
-// node has seen. So a newcomer is caught up by being sent the state, a peer that hears a
-// change twice is unchanged by the second, and two that change the same thing at once end
-// up agreeing on one of them. Three more fields are about the sender rather than the room:
-// `hello` asks for the state, `synced` ends an answer to that, and `have` lists the tracks
-// the sender holds every block of.
-//
-// Nothing here is signed. A frame is attributed by the channel it arrived on, and the guest
-// passes on only those from members of the room, so the state is the members' to write:
-// any of them may reorder the list, and what one relays of another's is its own word.
-//
-// AUDIO is the file's own bytes, never a copy made of them. A FLAC or Ogg Vorbis file is cut
-// where its format lets a piece be decoded without the rest (formats.js), and each piece is
-// a block, named by the BLAKE2b-256 of its bytes. A track lists its blocks, how many samples
-// each holds (`lens`), the block every piece is decoded behind (`head`), and for Ogg Vorbis
-// how much of the piece before goes in front of each when it is decoded (`pre`). So a block
-// needs no trust in who sent it: our guest hashes what arrives, and one that is not the
-// block asked for is not kept. Whoever added a track serves it from the file on disk, and
-// everyone who has fetched a track serves it too.
 //
 // PLAYING is the room's, and listening is each node's own. `play` says which track, from
 // where, and whether it is running. A node that has tuned in asks for the piece the room
@@ -55,12 +20,12 @@
 // not wait for the whole track, only for enough of it ahead of the room that it will not
 // run dry: the room's clock does not stop for a node whose blocks are slow, so a node
 // starts once what it holds, and what is still arriving, will carry it through.
+//
+// A LIBRARY is a member's, and this view is how a person looks through one: it asks for the
+// titles that match what was typed (FIND), shows the ones it is told of (FOUND), and asks
+// for one to be put in the room's list (PICK), to be played like any other track.
 const RENDER_BLOCK = 2;
-const ASK_HASH = 3;
-const DOC = 1, WANT = 2, NACK = 3, BLOCK = 4;
 
-/** The largest file taken. */
-const MAX_FILE_BYTES = 512 * 1024 * 1024;
 /** How far ahead of where it is sounding a node keeps its track decoded, in seconds. */
 const AHEAD_S = 8;
 /** The least of its track a node holds ahead of the room before it starts sounding, in
@@ -82,12 +47,9 @@ const WANT_TIMEOUT_MS = 15000;
 const FLOW_MIN_BYTES = 16 * 1024;
 /** A peer that let a block time out is not asked again for this long. */
 const STRIKE_MS = 8000;
-/** A peer that has not answered `hello` is asked again after this long. */
-const HELLO_RETRY_MS = 3000;
-/** A state answer is cut into documents of about this many characters. */
-const DOC_CHARS = 200000;
-/** The most a room keeps, and the longest a peer's text is taken. */
-const MAX = { msgs: 300, text: 2000, tracks: 500, blocks: 4096, title: 160, emoji: 24, emojis: 40 };
+/** A library is asked this long after the last key typed, and for no more titles than this. */
+const FIND_PAUSE_MS = 250;
+const MAX_FOUND = 2000;
 
 const EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "😍", "🤩", "😎", "🥳", "😭", "😮", "🙏", "👏", "💯", "✨",
   "🎵", "🎶", "🎸", "🥁", "🎹", "🎷", "🎺", "🎤", "🎧", "💃", "🕺", "🤘", "🙌", "😴", "🤔", "😅",
@@ -102,6 +64,7 @@ const ICON = {
   down: '<svg viewBox="0 0 24 24"><path d="M12 17l7-9H5z"/></svg>',
   save: '<svg viewBox="0 0 24 24"><path d="M11 4h2v8.2l3.3-3.3 1.4 1.4L12 16l-5.7-5.7 1.4-1.4 3.3 3.3zM5 18h14v2H5z"/></svg>',
   remove: '<svg viewBox="0 0 24 24"><path d="M6.4 5L5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>',
+  add: '<svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>',
   react: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2a7 7 0 110 14 7 7 0 010-14zM9 9.2a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6zm6 0a1.3 1.3 0 100 2.6 1.3 1.3 0 000-2.6zm-6.6 4.6c.7 1.6 2 2.5 3.6 2.5s2.9-.9 3.6-2.5l-1.4-.6c-.5 1-1.2 1.6-2.2 1.6s-1.7-.6-2.2-1.6z"/></svg>',
 };
 
@@ -113,49 +76,14 @@ const side = $("side"), player = $("player"), npTitle = $("np-title"), npSub = $
 const seek = $("seek"), seekFill = $("seek-fill"), npPos = $("np-pos"), npDur = $("np-dur");
 const prevBtn = $("prev"), playBtn = $("play"), nextBtn = $("next"), listenBtn = $("listen"), volume = $("volume");
 const listEl = $("list"), listCount = $("list-count"), addBtn = $("add"), aloneNote = $("alone"), fileInput = $("file");
+const listTitle = $("list-title"), browseBtn = $("browse"), libraryEl = $("library");
+const libWho = $("lib-who"), libQuery = $("lib-q"), libList = $("lib-list");
 const picker = $("picker"), toasts = $("toasts");
 
-// ── bytes ───────────────────────────────────────────────────────────────
-const enc = new TextEncoder();
-const dec = new TextDecoder();
-/** Block ids as they ride in a WANT or a NACK, back to hex. */
-function idsOf(body) {
-  const out = [];
-  for (let o = 0; o + 32 <= body.length; o += 32) out.push(toHex(body.subarray(o, o + 32)));
-  return out;
-}
-const randomHex = (bytes) => toHex(crypto.getRandomValues(new Uint8Array(bytes)));
-
-// What a peer sends is read as what it claims to be only once it has that shape.
-const isHex = (v, bytes) => typeof v === "string" && v.length === bytes * 2 && /^[0-9a-f]*$/.test(v);
-const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
-const isSpan = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
-const listOf = (v, max) => (Array.isArray(v) ? v.slice(0, max) : []);
-/** Whether the change (v, by) is later than (v0, by0): the clock, then the key. */
-const later = (v, by, v0, by0) => v > v0 || (v === v0 && by > by0);
-
-// ── our guest ───────────────────────────────────────────────────────────
-const castDoc = (room, doc) => app.cast(room.id, [DOC], enc.encode(JSON.stringify(doc)));
-const tellDoc = (room, to, doc) => app.tell(room.id, to, [DOC], enc.encode(JSON.stringify(doc)));
-
-/** What a block of `bytes` is called. Our guest's to say, so a view and a guest never name
- *  one block two ways. */
-const hashOf = (bytes) => app.call([ASK_HASH], bytes).then(toHex);
-
-// ── who, and where ──────────────────────────────────────────────────────
-// All of it the shell's, heard in the context: this node's key and nick, each peer's nick,
-// who is linked, and the rooms this node is in.
-let me = "";
-let myNick = "";
-let nicks = new Map();
-let linked = new Set();
-/** The rooms this node is in, by id in hex, and the one open. */
-const rooms = new Map();
+// ── what a listener keeps ───────────────────────────────────────────────
+/** The room open, of the ones this node is in (`rooms`, room.js). */
 let active = null;
 
-/** The blocks this node holds, by id in hex, whatever room wants them: a slice of a file
- *  it was given, or bytes a peer sent. */
-const store = new Map();
 /** The blocks asked of a peer and not yet here: id → { room, t, peer, at }. `asked` is
  *  every id ever asked for, so one that arrives late is still kept. */
 const pending = new Map();
@@ -175,25 +103,6 @@ const saving = new Set();
 /** Whether this node plays what its room is playing. */
 let listening = false;
 
-function newRoom(id) {
-  const log = document.createElement("div");
-  log.hidden = true;
-  logs.appendChild(log);
-  return {
-    id, name: "", members: new Set(),
-    clock: 0,
-    msgs: new Map(),    // key → { key, by, id, n, at, text }
-    reacts: new Map(),  // target → emoji → peer → { on, n }
-    tracks: new Map(),  // id → track; one with no `blocks` is known of and not yet described
-    play: { v: 0, by: "", id: null, pos: 0, on: false, at: 0 },
-    blocks: new Set(),  // every block id a track here lists: what this room may be asked for
-    peers: new Map(),   // the linked members: key → { synced, asked, tries }
-    holders: new Map(), // track id → the peers that say they hold all of it
-    aim: null,          // where this node asks from while it waits to start: { v, at, known } (`aimOf`)
-    log, els: new Map(),
-  };
-}
-
 const short = (id) => id.slice(0, 8);
 function nameOf(id) {
   return (id === me ? myNick : nicks.get(id)) || short(id);
@@ -205,9 +114,6 @@ function fmtTime(s) {
   const ss = String(s % 60).padStart(2, "0");
   return h > 0 ? `${h}:${String(m % 60).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
-function fmtSize(n) {
-  return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
-}
 
 function toast(text) {
   const el = document.createElement("div");
@@ -217,17 +123,7 @@ function toast(text) {
   setTimeout(() => el.remove(), 6000);
 }
 
-// ── the room's state ────────────────────────────────────────────────────
-/** The tracks in the list, in order. */
-function liveTracks(room) {
-  return [...room.tracks.values()].filter((t) => t.blocks && !t.gone)
-    .sort((a, b) => a.pos - b.pos || (a.id < b.id ? -1 : 1));
-}
-/** Whether this node holds every block of `t`. */
-function whole(t) {
-  if (!t.whole && t.blocks && store.has(t.head) && t.blocks.every((b) => store.has(b))) t.whole = true;
-  return t.whole === true;
-}
+// ── how much of a track is here ─────────────────────────────────────────
 /** Which piece of `t` the place `seconds` into it falls in. */
 function pieceAt(t, seconds) {
   const sample = Math.floor(seconds * t.rate);
@@ -238,16 +134,6 @@ function pieceAt(t, seconds) {
     else lo = mid + 1;
   }
   return lo;
-}
-function holdersOf(room, id) {
-  let set = room.holders.get(id);
-  if (!set) room.holders.set(id, set = new Set());
-  return set;
-}
-/** The members jamming here besides this node: the linked ones that have answered. A
- *  room-mate that does not run this app is in the room and never answers. */
-function jamming(room) {
-  return [...room.peers].filter(([, peer]) => peer.synced).map(([id]) => id);
 }
 /** The linked members that hold `t`. One that just let a block time out is left out while
  *  another can be asked instead. */
@@ -301,224 +187,6 @@ function aimOf(room, t) {
   room.aim = { v: room.play.v, at: Math.min(at + lead, t.dur), known: speed !== Infinity };
   return room.aim.at;
 }
-/** Where the room is in its track, in seconds. Below zero, the track has yet to begin. */
-function playPos(room) {
-  const p = room.play;
-  return p.on ? p.pos + (performance.now() - p.at) / 1000 : p.pos;
-}
-function currentTrack(room) {
-  const t = room.play.id ? room.tracks.get(room.play.id) : undefined;
-  return t && t.blocks && !t.gone ? t : null;
-}
-
-/** Whether `t` describes a track: what it is called, how it is coded, and its pieces. */
-function describes(t) {
-  const n = Array.isArray(t.blocks) ? t.blocks.length : 0;
-  return isHex(t.by, 32) && isCount(t.n) && typeof t.title === "string" && isCount(t.size)
-    && (t.codec === "flac" || t.codec === "vorbis")
-    && isCount(t.rate) && t.rate >= 8000 && t.rate <= 384000 && isCount(t.ch) && t.ch >= 1 && t.ch <= 8
-    && isHex(t.head, 32) && n >= 1 && n <= MAX.blocks && t.blocks.every((b) => isHex(b, 32))
-    && Array.isArray(t.lens) && t.lens.length === n && t.lens.every((len) => isCount(len) && len > 0 && len <= t.rate * 60)
-    && (t.pre === undefined || (Array.isArray(t.pre) && t.pre.length === n && t.pre.every((p) => isCount(p) && p <= 0x100000)));
-}
-
-/** Merge a document into the room's state, and answer what changed, for `refresh`. The
- *  same for this node's own change, a peer's, and a whole state: nothing here depends on
- *  who sent it or how often. */
-function merge(room, doc) {
-  const changed = { msgs: [], added: [], reacts: new Set(), list: false, play: false };
-  const seen = (n) => { if (n > room.clock) room.clock = n; };
-
-  for (const m of listOf(doc.msgs, MAX.msgs)) {
-    if (!m || !isHex(m.by, 32) || !isHex(m.id, 8) || !isCount(m.n) || typeof m.text !== "string" || m.text === "") continue;
-    seen(m.n);
-    const key = `m:${m.by}:${m.id}`;
-    if (room.msgs.has(key)) continue;
-    room.msgs.set(key, { key, by: m.by, id: m.id, n: m.n, at: isCount(m.at) ? m.at : 0, text: m.text.slice(0, MAX.text) });
-    changed.msgs.push(key);
-  }
-
-  for (const r of listOf(doc.reacts, 4096)) {
-    if (!r || typeof r.t !== "string" || r.t.length > 90 || typeof r.e !== "string" || r.e === ""
-      || r.e.length > MAX.emoji || !isHex(r.by, 32) || !isCount(r.n)) continue;
-    seen(r.n);
-    let byEmoji = room.reacts.get(r.t);
-    if (!byEmoji) room.reacts.set(r.t, byEmoji = new Map());
-    let byPeer = byEmoji.get(r.e);
-    if (!byPeer) {
-      if (byEmoji.size >= MAX.emojis) continue;
-      byEmoji.set(r.e, byPeer = new Map());
-    }
-    const had = byPeer.get(r.by);
-    if (had && had.n >= r.n) continue;
-    byPeer.set(r.by, { on: r.on === true, n: r.n });
-    changed.reacts.add(r.t);
-  }
-
-  for (const t of listOf(doc.tracks, MAX.tracks)) {
-    if (!t || !isHex(t.id, 8) || !isCount(t.v) || !isHex(t.vBy, 32)) continue;
-    seen(t.v);
-    let have = room.tracks.get(t.id);
-    if (!have) {
-      // A full room forgets the oldest track that was removed, and takes no more once
-      // every one it knows of is still in the list.
-      if (room.tracks.size >= MAX.tracks) {
-        const oldest = [...room.tracks.values()].filter((o) => o.gone).sort((a, b) => a.v - b.v)[0];
-        if (!oldest) continue;
-        room.tracks.delete(oldest.id);
-      }
-      room.tracks.set(t.id, have = { id: t.id, blocks: null, pos: 0, gone: false, goneAt: 0, v: 0, vBy: "" });
-    }
-    // What a track is never changes, so the first description of it stands.
-    if (!have.blocks && !have.gone && t.gone !== true && describes(t)) {
-      seen(t.n);
-      // Where each piece starts, in samples, and so how long the track is.
-      const starts = [0];
-      for (const len of t.lens) starts.push(starts[starts.length - 1] + len);
-      Object.assign(have, {
-        by: t.by, n: t.n, title: t.title.slice(0, MAX.title) || "untitled", size: t.size,
-        codec: t.codec, rate: t.rate, ch: t.ch, head: t.head, blocks: t.blocks.slice(), lens: t.lens.slice(),
-        pre: t.pre ? t.pre.slice() : null, starts, dur: starts[starts.length - 1] / t.rate,
-      });
-      room.blocks.add(have.head);
-      for (const b of have.blocks) room.blocks.add(b);
-      changed.added.push(t.id);
-      changed.list = true;
-    }
-    if (t.gone === true && !have.gone) {
-      have.gone = true;
-      have.goneAt = performance.now();
-      forgetTrack(have);
-      changed.list = true;
-    }
-    if (later(t.v, t.vBy, have.v, have.vBy)) {
-      if (typeof t.pos === "number" && Number.isFinite(t.pos)) have.pos = t.pos;
-      have.v = t.v;
-      have.vBy = t.vBy;
-      changed.list = true;
-    }
-  }
-
-  const p = doc.play;
-  if (p && isCount(p.v) && isHex(p.by, 32) && (p.id === null || isHex(p.id, 8))
-    && typeof p.pos === "number" && Number.isFinite(p.pos) && p.pos >= -60) {
-    seen(p.v);
-    if (later(p.v, p.by, room.play.v, room.play.by)) {
-      room.play = { v: p.v, by: p.by, id: p.id, pos: p.pos, on: p.on === true, at: performance.now() };
-      changed.play = true;
-    }
-  }
-
-  // The oldest messages go once there are too many, and what was said of them.
-  if (room.msgs.size > MAX.msgs) {
-    const oldest = [...room.msgs.values()].sort((a, b) => a.n - b.n).slice(0, room.msgs.size - MAX.msgs);
-    for (const m of oldest) {
-      room.msgs.delete(m.key);
-      room.reacts.delete(m.key);
-      room.els.get(m.key)?.remove();
-      room.els.delete(m.key);
-    }
-  }
-  return changed;
-}
-
-/** A track as it rides in a document. One that is gone, or not yet described, is its id
- *  and where it stands. */
-function wireTrack(t) {
-  if (!t.blocks || t.gone) return { id: t.id, pos: t.pos, gone: t.gone, v: t.v, vBy: t.vBy };
-  return { id: t.id, by: t.by, n: t.n, title: t.title, codec: t.codec, rate: t.rate, ch: t.ch, size: t.size,
-    head: t.head, blocks: t.blocks, lens: t.lens, ...(t.pre ? { pre: t.pre } : {}),
-    pos: t.pos, gone: false, v: t.v, vBy: t.vBy };
-}
-
-/** The room's whole state, as the documents a newcomer is sent: cut so no frame is large,
- *  with what is playing, what this node holds, and `synced` in the last. */
-function stateDocs(room) {
-  const docs = [];
-  let doc = {}, chars = 0;
-  const put = (field, item) => {
-    const size = JSON.stringify(item).length;
-    if (chars > 0 && chars + size > DOC_CHARS) { docs.push(doc); doc = {}; chars = 0; }
-    (doc[field] ??= []).push(item);
-    chars += size;
-  };
-  for (const { by, id, n, at, text } of room.msgs.values()) put("msgs", { by, id, n, at, text });
-  for (const [t, byEmoji] of room.reacts) {
-    for (const [e, byPeer] of byEmoji) for (const [by, r] of byPeer) put("reacts", { t, e, by, on: r.on, n: r.n });
-  }
-  for (const t of room.tracks.values()) put("tracks", wireTrack(t));
-  const p = room.play;
-  // Where the room is NOW, since the reader starts its own clock when this arrives.
-  if (p.v > 0) doc.play = { v: p.v, by: p.by, id: p.id, pos: playPos(room), on: p.on };
-  doc.have = liveTracks(room).filter(whole).map((t) => t.id);
-  doc.synced = true;
-  docs.push(doc);
-  return docs;
-}
-
-/** Make a change of this node's own: here first, then to the room. */
-function apply(room, doc) {
-  refresh(room, merge(room, doc));
-  castDoc(room, doc);
-}
-
-/** A peer's document. What it says of the room is merged; what it says of itself is kept
- *  beside the room, under the key the channel gave. */
-function onDoc(room, from, doc) {
-  if (!doc || typeof doc !== "object") return;
-  refresh(room, merge(room, doc), from);
-  if (Array.isArray(doc.have)) {
-    for (const id of listOf(doc.have, MAX.tracks)) if (isHex(id, 8)) holdersOf(room, id).add(from);
-    drawStates();
-    pump();
-  }
-  const peer = room.peers.get(from);
-  if (doc.synced === true && peer && !peer.synced) {
-    peer.synced = true;
-    drawHeader();
-  }
-  if (doc.hello === true) {
-    for (const d of stateDocs(room)) tellDoc(room, from, d);
-    // It runs this app after all, so it is worth asking again.
-    if (peer && !peer.synced) { peer.tries = 0; greet(room); }
-  }
-}
-
-/** Ask each linked member that has not answered for the room's state. A member is asked
- *  until it answers, since it may not yet have heard that this node is in the room. */
-function greet(room) {
-  const now = performance.now();
-  for (const [id, peer] of room.peers) {
-    if (peer.synced || peer.tries >= 20 || now - peer.asked < HELLO_RETRY_MS) continue;
-    peer.asked = now;
-    peer.tries++;
-    tellDoc(room, id, { hello: true });
-  }
-}
-
-/** Let go of a track's audio: each block no track still in a list names. */
-function forgetTrack(t) {
-  if (session && session.t === t) hush();
-  saving.delete(t);
-  t.whole = false;
-  if (!t.blocks) return;
-  const kept = new Set();
-  for (const room of rooms.values()) {
-    for (const other of room.tracks.values()) {
-      if (other === t || !other.blocks || other.gone) continue;
-      kept.add(other.head);
-      for (const b of other.blocks) kept.add(b);
-    }
-  }
-  for (const b of [t.head, ...t.blocks]) if (!kept.has(b)) { store.delete(b); pending.delete(b); }
-}
-
-function leaveRoom(room) {
-  rooms.delete(room.id);
-  for (const t of room.tracks.values()) forgetTrack(t);
-  for (const [id, w] of pending) if (w.room === room) pending.delete(id);
-  room.log.remove();
-}
 
 // ── this node's own changes ─────────────────────────────────────────────
 function post(room, text) {
@@ -529,10 +197,6 @@ function post(room, text) {
 function react(room, target, emoji) {
   const on = room.reacts.get(target)?.get(emoji)?.get(me)?.on !== true;
   apply(room, { reacts: [{ t: target, e: emoji, by: me, on, n: ++room.clock }] });
-}
-
-function setPlay(room, id, pos, on) {
-  apply(room, { play: { v: ++room.clock, by: me, id, pos, on } });
 }
 
 /** Start a track for the room. Whoever starts one is listening. Unless everyone jamming
@@ -550,7 +214,7 @@ function togglePlay() {
   if (!room) return;
   const t = currentTrack(room);
   if (!t) {
-    const first = liveTracks(room)[0];
+    const first = liveTracks(room).find((o) => available(room, o));
     if (first) start(room, first.id);
     return;
   }
@@ -560,14 +224,16 @@ function togglePlay() {
   setPlay(room, t.id, pos >= t.dur - 0.5 ? 0 : pos, true);
 }
 
-/** The next track, or the one before. Back from well into a track is back to its start. */
+/** The next track someone here has, or the one before. Back from well into a track is back
+ *  to its start. */
 function step(dir) {
   const room = active;
   if (!room) return;
   const order = liveTracks(room);
   const i = order.findIndex((t) => t.id === room.play.id);
-  if (dir < 0 && i >= 0 && playPos(room) > 3) { start(room, order[i].id); return; }
-  const to = i < 0 ? order[dir > 0 ? 0 : order.length - 1] : order[i + dir];
+  if (dir < 0 && i >= 0 && playPos(room) > 3 && available(room, order[i])) { start(room, order[i].id); return; }
+  const ahead = dir > 0 ? order.slice(i + 1) : order.slice(0, i < 0 ? order.length : i).reverse();
+  const to = ahead.find((t) => available(room, t));
   if (to) start(room, to.id);
 }
 
@@ -583,29 +249,6 @@ function move(room, t, dir) {
 
 function removeTrack(room, t) {
   apply(room, { tracks: [{ id: t.id, pos: t.pos, gone: true, v: ++room.clock, vBy: me }] });
-}
-
-/** Whether this node is the one to move the room on when a track ends: the highest key
- *  there. The others wait a little, and take over only if it does not. */
-function leads(room) {
-  return jamming(room).every((id) => id < me);
-}
-
-/** Move the room on once its track is over, or gone from the list. Every node works this
- *  out from the same state, so they agree on what is next; they say so one after another
- *  rather than all at once. */
-function moveOn(room) {
-  const p = room.play;
-  if (!p.on || !p.id) return;
-  // A track this node has not heard of yet is not one it can say is over: a newcomer is
-  // told what is playing before it has the whole list.
-  const t = room.tracks.get(p.id);
-  if (!t || (!t.blocks && !t.gone)) return;
-  const over = t.gone ? (performance.now() - Math.max(p.at, t.goneAt)) / 1000 : playPos(room) - t.dur;
-  if (over < (leads(room) ? 0.25 : 2.5)) return;
-  const next = liveTracks(room).find((o) => o.pos > t.pos || (o.pos === t.pos && o.id > t.id));
-  if (next) setPlay(room, next.id, 0, true);
-  else setPlay(room, null, 0, false);
 }
 
 // ── audio in: files ─────────────────────────────────────────────────────
@@ -634,42 +277,13 @@ function addFiles(room, files) {
   drawSoon();
 }
 
-/** Add one file. It is cut where its format allows (formats.js) and stays on disk as it
- *  is: a block in the store is a slice of the file, read when a peer asks for it, so what a
- *  peer is sent is the file's own bytes. */
+/** Add one file, as a track of this node's (`addTrack`, room.js): cut where its format
+ *  allows, once this browser has shown it plays a piece cut that way, and left on disk. */
 async function addFile(room, file, up) {
   try {
-    if (liveTracks(room).length >= MAX.tracks) throw new Error("the list is full");
-    if (file.size > MAX_FILE_BYTES) throw new Error(`it is over ${fmtSize(MAX_FILE_BYTES)}`);
-    // Half the work is finding where to cut, and half naming the pieces.
-    const ix = await indexAudio(file, (part) => { up.done = part / 2; drawStates(); });
-    if (ix.cuts.length > MAX.blocks) throw new Error("it is too long");
-    await proves(ix, file);
-    const head = await hashOf(ix.head);
-    store.set(head, new Blob([ix.head]));
-    const blocks = [];
-    for (const piece of ix.cuts) {
-      const part = file.slice(piece.start, piece.end);
-      const id = await hashOf(new Uint8Array(await part.arrayBuffer()));
-      store.set(id, part);
-      blocks.push(id);
-      up.done = 0.5 + blocks.length / ix.cuts.length / 2;
-      drawStates();
-    }
-    if (rooms.get(room.id) !== room) return;   // the room was left meanwhile
-    const n = ++room.clock;
-    const last = Math.max(0, ...[...room.tracks.values()].map((t) => t.pos));
-    const id = randomHex(8);
-    const { title, artist } = ix.tags;
-    apply(room, {
-      tracks: [{
-        id, by: me, n, size: file.size,
-        title: title ? (artist ? `${artist} – ${title}` : title) : file.name.replace(/\.[^.]+$/, "") || file.name,
-        codec: ix.codec, rate: ix.rate, ch: ix.channels, head, blocks, lens: ix.cuts.map((c) => c.samples),
-        ...(ix.codec === "vorbis" ? { pre: ix.cuts.map((c) => c.pre) } : {}),
-        pos: last + 1, gone: false, v: n, vBy: me,
-      }],
-      have: [id],
+    await addTrack(room, randomHex(8), file, file.name.replace(/\.[^.]+$/, "") || file.name, {
+      progress: (done) => { up.done = done; drawStates(); },
+      proves: (ix) => proves(ix, file),
     });
   } catch (err) {
     toast(`${file.name} was not added: ${err.message}.`);
@@ -786,19 +400,6 @@ function onNack(room, from, ids) {
   }
   drawStates();
   pump();
-}
-
-/** Send a member the blocks it asked for, of the ones a track in this room lists. */
-async function serve(room, from, ids) {
-  const lacking = [];
-  for (const id of ids.slice(0, 16)) {
-    const blob = room.blocks.has(id) ? store.get(id) : undefined;
-    try {
-      if (!blob) throw new Error("not held");
-      app.tell(room.id, from, [BLOCK], new Uint8Array(await blob.arrayBuffer()));
-    } catch { lacking.push(id); }   // not held, or its file can no longer be read
-  }
-  if (lacking.length > 0) app.tell(room.id, from, [NACK], fromHex(lacking.join("")));
 }
 
 // ── audio back out: a file ──────────────────────────────────────────────
@@ -1124,7 +725,7 @@ function refresh(room, changed, from) {
   }
 }
 
-/** The list's rows as drawn, each { t, li, sub, fill }, and each file being read in with
+/** The list's rows as drawn, each { t, li, play, sub, fill }, and each file being read in with
  *  its row's line of text. Kept so that what only moves, how much of a track is here, is
  *  written into the rows that are there: a list rebuilt under a click loses the click. */
 let rows = [];
@@ -1132,10 +733,10 @@ let rows = [];
 /** Why a track is not ready to play here, or nothing if it is. */
 function trackState(room, t) {
   if (whole(t)) return "";
+  if (!available(room, t)) return "nobody here has it";
   const held = t.blocks.filter((b) => store.has(b)).length;
   const part = `${Math.floor((100 * held) / t.blocks.length)}%`;
   if (!saving.has(t) && (held > 0 || t.blocks.some((b) => pending.has(b)))) return part;
-  if (sources(room, t, performance.now()).length === 0) return "nobody here has it";
   return saving.has(t) ? `downloading… ${part}` : "";
 }
 
@@ -1146,7 +747,7 @@ function drawList() {
   rows = [];
   if (!room) return;
   const order = liveTracks(room);
-  if (order.length > 0) {
+  if (order.length > 0 && !shelf) {
     listCount.textContent = `${order.length} track${order.length === 1 ? "" : "s"} · ${fmtTime(order.reduce((s, t) => s + t.dur, 0))}`;
   }
   order.forEach((t, i) => {
@@ -1177,24 +778,28 @@ function drawList() {
     fill.className = "t-fill";
     li.append(startBtn, mainEl, acts, fill);
     listEl.appendChild(li);
-    rows.push({ t, li, sub, fill });
+    rows.push({ t, li, play: startBtn, sub, fill });
   });
-  for (const up of uploads) {
-    if (up.room !== room) continue;
+  // What is on its way into the list: a file being read in, and a title a library was
+  // asked for.
+  const coming = (name, says) => {
     const li = document.createElement("li");
     li.className = "track away";
     const mainEl = document.createElement("div");
     mainEl.className = "t-main";
     const title = document.createElement("div");
     title.className = "t-title";
-    title.textContent = up.name;
+    title.textContent = name;
     const sub = document.createElement("div");
     sub.className = "t-sub";
-    up.sub = sub;
+    sub.textContent = says;
     mainEl.append(title, sub);
     li.appendChild(mainEl);
     listEl.appendChild(li);
-  }
+    return sub;
+  };
+  for (const up of uploads) if (up.room === room) up.sub = coming(up.name, "");
+  for (const p of picks.values()) if (p.room === room) coming(leafOf(p.path), `${nameOf(p.peer)} is adding it…`);
   if (listEl.childElementCount === 0) {
     const li = document.createElement("li");
     li.className = "none note";
@@ -1209,9 +814,11 @@ function drawList() {
 function drawStates() {
   const room = active;
   if (!room) return;
-  for (const { t, li, sub, fill } of rows) {
+  for (const { t, li, play, sub, fill } of rows) {
     const state = trackState(room, t);
-    li.classList.toggle("away", state === "nobody here has it");
+    // A track nobody here has is not started, and the room passes over it (`moveOn`).
+    play.disabled = state === "nobody here has it";
+    li.classList.toggle("away", play.disabled);
     sub.textContent = [fmtTime(t.dur), nameOf(t.by), fmtSize(t.size), state].filter(Boolean).join(" · ");
     fill.hidden = whole(t);
     fill.style.width = `${(100 * t.blocks.filter((b) => store.has(b)).length) / t.blocks.length}%`;
@@ -1235,9 +842,9 @@ function drawPlayer() {
       // A node that listens and hears nothing is waiting to hold enough, and on a slow link
       // knows about when that will be.
       const wait = (room.aim ? room.aim.at : at) - at;
-      sub = sources(room, t, performance.now()).length === 0 && !whole(t) ? "nobody here has it"
+      sub = !available(room, t) ? "nobody here has it"
         : wait > 3 ? `buffering… joins in ${fmtTime(wait)}` : "buffering…";
-    } else sub = `${on ? "started" : "paused"} by ${nameOf(room.play.by)}`;
+    } else sub = `${on ? "started" : "paused"} by ${room.play.by === me ? "you" : nameOf(room.play.by)}`;
   } else if (room && liveTracks(room).length > 0) sub = "press play to start the room";
   npSub.textContent = sub;
   const label = on ? "Pause for everyone" : "Play for everyone";
@@ -1257,12 +864,15 @@ function drawPlayer() {
   // Music is added to a room, and is for whoever else is in it. Where there is no room, or
   // nobody else in it is linked, the list says so: a button that only greys out does not
   // say why. Linked, not jamming: a peer that has yet to answer `hello` is there all the same.
-  addBtn.hidden = !room;
+  // While a library is open it has the list's place, and its button leads back.
+  addBtn.hidden = !room || !!shelf;
   const alone = !room ? "Not connected to a room. Join one on the Network tab to add music."
     : room.peers.size > 0 ? ""
     : "Nobody else is connected here yet: music you add is shared once someone joins.";
   aloneNote.textContent = alone;
-  aloneNote.hidden = alone === "";
+  aloneNote.hidden = alone === "" || !!shelf;
+  browseBtn.hidden = !shelf && (!room || librariesOf(room).length === 0);
+  browseBtn.textContent = shelf ? "Playlist" : "Library";
   drawProgress();
 }
 
@@ -1289,6 +899,7 @@ function drawSoon() {
   queueMicrotask(() => {
     drawing = false;
     drawList();
+    drawLibrary();
     drawPlayer();
   });
 }
@@ -1314,6 +925,7 @@ function drawHeader() {
 function openRoom(room) {
   if (active) active.log.hidden = true;
   active = room;
+  shelf = null;   // a library is a member's of the room that was open
   if (room) {
     room.log.hidden = false;
     logs.scrollTop = logs.scrollHeight;
@@ -1323,6 +935,165 @@ function openRoom(room) {
   drawSoon();
   syncAudio();
   pump();
+}
+
+// ── a library ───────────────────────────────────────────────────────────
+// A member with more music than a list is for says how many titles it has (`library`,
+// room.js), and the list's Library button opens it in the list's place: a field to type
+// in, and the titles that match what is typed, each to be played now or put at the list's
+// end. Either is asked of the member whose library it is (PICK), which adds the track
+// itself: this node hears of it as it does of any track, and knows it by the id it chose.
+
+/** The library open, or null: whose it is, what was typed, and the titles heard so far of
+ *  the `total` that match, which is null until an answer has come:
+ *  { room, peer, q, titles: [{ path, size }], total }. */
+let shelf = null;
+/** The titles picked and not yet in the list, by the id each is to be a track under:
+ *  { room, peer, path, play }, `play` for one to start as soon as it is there. */
+const picks = new Map();
+/** The wait after a key typed, before the library is asked. */
+let typing = null;
+
+/** The linked members of `room` that say they have a library. */
+function librariesOf(room) {
+  return [...room.libraries.keys()].filter((id) => room.peers.has(id)).sort();
+}
+/** A title as a list shows it: its file's name without what kind of file it is, and the
+ *  folders it is in. */
+const leafOf = (path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "") || path;
+const folderOf = (path) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+
+/** Ask the open library for the titles that match what was typed, from the `from`th on. */
+function askLibrary(from) {
+  tellJson(shelf.room, shelf.peer, FIND, { q: shelf.q, from });
+}
+
+function openLibrary(room, peer) {
+  shelf = { room, peer, q: "", titles: [], total: null };
+  libQuery.value = "";
+  askLibrary(0);
+  drawSoon();
+}
+
+function closeLibrary() {
+  shelf = null;
+  drawSoon();
+}
+
+/** A library's answer: the next titles of the ones that match. Taken if it is the open
+ *  library's, for what is typed now, and goes on from the titles already here. An answer
+ *  that adds none is the end of them, whatever it says of how many there are. */
+function onFound(room, from, found) {
+  if (!shelf || shelf.room !== room || shelf.peer !== from || !found) return;
+  if (found.q !== shelf.q || found.from !== shelf.titles.length) return;
+  const had = shelf.titles.length;
+  for (const t of listOf(found.titles, 200)) {
+    if (t && typeof t.path === "string" && t.path !== "" && t.path.length <= MAX.path && isCount(t.size)) shelf.titles.push({ path: t.path, size: t.size });
+  }
+  shelf.total = Math.max(shelf.titles.length, shelf.titles.length > had && isCount(found.total) ? found.total : 0);
+  drawLibrary();
+}
+
+/** Ask for a title to be put in the room's list, and with `play` to start it once it is
+ *  there. Whoever starts a track is listening, and a browser lets a page make sound only
+ *  behind a click, which is now and not when the track comes. */
+function pickTitle(title, play) {
+  const { room, peer } = shelf;
+  if (play) tuneIn();
+  const id = randomHex(8);
+  picks.set(id, { room, peer, path: title.path, play });
+  tellJson(room, peer, PICK, { path: title.path, id });
+  drawSoon();
+}
+
+/** A track is in the list. One this node picked is no longer waited for, and starts if
+ *  that was asked. */
+function onPicked(room, id) {
+  const p = picks.get(id);
+  if (!p || p.room !== room) return;
+  picks.delete(id);
+  if (p.play) start(room, id);
+  drawSoon();
+}
+
+/** A library did not add a title it was asked for, and says why. */
+function onMiss(room, from, miss) {
+  const p = miss ? picks.get(miss.id) : undefined;
+  if (!p || p.room !== room || p.peer !== from) return;
+  picks.delete(miss.id);
+  const why = typeof miss.why === "string" && miss.why !== "" ? miss.why.slice(0, 200) : "its library could not add it";
+  toast(`${leafOf(p.path)} was not added: ${why}.`);
+  drawSoon();
+}
+
+/** The context changed. A library whose member is gone is closed, and what was picked from
+ *  it is not coming. */
+function libraryLeft() {
+  const there = (room, peer) => rooms.get(room.id) === room && room.peers.has(peer);
+  for (const [id, p] of picks) {
+    if (there(p.room, p.peer)) continue;
+    picks.delete(id);
+    toast(`${leafOf(p.path)} was not added: its library has left.`);
+  }
+  if (shelf && !(there(shelf.room, shelf.peer) && shelf.room.libraries.has(shelf.peer))) shelf = null;
+}
+
+/** A line of a library's list that is not a title: what it says, or a button. */
+function libraryLine(cls, ...what) {
+  const li = document.createElement("li");
+  li.className = cls;
+  li.append(...what);
+  libList.appendChild(li);
+}
+
+function drawLibrary() {
+  libraryEl.hidden = !shelf;
+  listEl.hidden = !!shelf;
+  listTitle.textContent = shelf ? "Library" : "Playlist";
+  if (!shelf) return;
+  const { room, peer, q, titles, total } = shelf;
+  // Whose it is, to choose between where more than one member has a library.
+  const whose = librariesOf(room);
+  if (document.activeElement !== libWho) {
+    libWho.replaceChildren();
+    for (const id of whose) libWho.add(new Option(nameOf(id), id, false, id === peer));
+  }
+  libWho.hidden = whose.length < 2;
+  const holds = room.libraries.get(peer);
+  libQuery.placeholder = `Search ${nameOf(peer)}'s ${holds} title${holds === 1 ? "" : "s"}`;
+  listCount.textContent = total === null ? "" : q === "" ? `${total} title${total === 1 ? "" : "s"}` : `${total} match${total === 1 ? "" : "es"}`;
+
+  libList.replaceChildren();
+  const coming = new Set([...picks.values()].filter((p) => p.room === room && p.peer === peer).map((p) => p.path));
+  for (const title of titles) {
+    const name = leafOf(title.path), waited = coming.has(title.path);
+    const li = document.createElement("li");
+    li.className = `track${waited ? " away" : ""}`;
+    const startBtn = button("start icon ghost", `Play ${name}`, ICON.play, () => pickTitle(title, true));
+    const mainEl = document.createElement("div");
+    mainEl.className = "t-main";
+    const head = document.createElement("div");
+    head.className = "t-title";
+    head.textContent = name;
+    const sub = document.createElement("div");
+    sub.className = "t-sub";
+    sub.textContent = [folderOf(title.path), fmtSize(title.size), waited ? "adding…" : ""].filter(Boolean).join(" · ");
+    mainEl.append(head, sub);
+    const acts = document.createElement("div");
+    acts.className = "t-acts";
+    const addToList = button("icon ghost", `Add ${name} to the list`, ICON.add, () => pickTitle(title, false));
+    startBtn.disabled = addToList.disabled = waited;
+    acts.appendChild(addToList);
+    li.append(startBtn, mainEl, acts);
+    libList.appendChild(li);
+  }
+  if (total === null) libraryLine("none note", "Asking…");
+  else if (titles.length === 0) libraryLine("none note", q === "" ? "This library is empty." : "Nothing in this library matches.");
+  else if (titles.length < total && titles.length < MAX_FOUND) {
+    const more = button("", "More titles", "", () => askLibrary(titles.length));
+    more.textContent = "More";
+    libraryLine("more", more);
+  }
 }
 
 // ── the emoji picker ────────────────────────────────────────────────────
@@ -1357,47 +1128,64 @@ document.addEventListener("pointerdown", (e) => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePicker(); });
 
 // ── what the shell hands us ─────────────────────────────────────────────
-/** The node's context. Its rooms are ours to keep a state for, and each one's linked
- *  members are who that state is shared with. */
-function onContext(ctx) {
-  me = ctx.me;
-  myNick = ctx.nick;
-  nicks = new Map(Object.entries(ctx.nicks));
-  linked = new Set(ctx.linked);
-  const ids = new Set(ctx.rooms.map((r) => r.id));
-  for (const room of [...rooms.values()]) if (!ids.has(room.id)) leaveRoom(room);
-  for (const r of ctx.rooms) {
-    let room = rooms.get(r.id);
-    if (!room) rooms.set(r.id, room = newRoom(r.id));
-    room.name = r.name;
-    room.members = new Set(r.members);
-    // A member that is no longer linked takes what it said of itself with it: when it is
-    // back it is asked again, and says again what it holds.
-    for (const id of [...room.peers.keys()]) {
-      if (linked.has(id) && room.members.has(id)) continue;
-      room.peers.delete(id);
-      for (const set of room.holders.values()) set.delete(id);
-    }
-    for (const id of room.members) {
-      if (id !== me && linked.has(id) && !room.peers.has(id)) room.peers.set(id, { synced: false, asked: -Infinity, tries: 0 });
-    }
-    greet(room);
+/** Let go of what a listener was doing with a track that is in no list here any more. */
+function quiet(t) {
+  if (session && session.t === t) hush();
+  saving.delete(t);
+}
+
+/** A room here changed (`merge`, room.js). What was being fetched, sounded or saved of a
+ *  track that is gone stops, a message too old to keep leaves the log, a title that was
+ *  picked is a track now, and the rest is drawn. */
+jam.changed = (room, changed, from) => {
+  for (const t of changed.gone) quiet(t);
+  for (const id of changed.freed) pending.delete(id);
+  for (const key of changed.trimmed) {
+    room.els.get(key)?.remove();
+    room.els.delete(key);
   }
+  refresh(room, changed, from);
+  for (const id of changed.added) onPicked(room, id);
+  if (!changed.peers) return;
+  drawHeader();
+  drawStates();
+  drawPlayer();
+  pump();
+};
+
+/** The node's context, which room.js keeps. What is left to a view is a log for each room
+ *  this node is newly in, an end to what it was doing with the ones it has left, and a
+ *  room to show. */
+function onContext(ctx) {
+  const { joined, left } = memberContext(ctx);
+  for (const room of joined) {
+    room.aim = null;        // where this node asks from while it waits to start: { v, at, known } (`aimOf`)
+    room.els = new Map();   // what is drawn in the log, by key
+    room.log = document.createElement("div");
+    room.log.hidden = true;
+    logs.appendChild(room.log);
+  }
+  for (const room of left) {
+    for (const t of room.tracks.values()) quiet(t);
+    for (const [id, w] of pending) if (w.room === room) pending.delete(id);
+    room.log.remove();
+  }
+  libraryLeft();
   if (!active || !rooms.has(active.id)) openRoom([...rooms.values()].sort((a, b) => a.name.localeCompare(b.name))[0] ?? null);
   else { drawHeader(); drawSoon(); pump(); }
 }
 
-/** A peer's frame, from a member of the room it names: [type u8][body]. */
+/** A peer's frame, from a member of the room it names: [type u8][body]. What every member
+ *  answers is room.js's. A listener is also told that a block is not to be had, and what
+ *  a library holds. */
 function onFrame(from, id, frame) {
   const room = rooms.get(id);
   if (!room || frame.length < 1) return;
   const body = frame.subarray(1);
-  if (frame[0] === DOC) {
-    let doc;
-    try { doc = JSON.parse(dec.decode(body)); } catch { return; }
-    onDoc(room, from, doc);
-  } else if (frame[0] === WANT) void serve(room, from, idsOf(body));
-  else if (frame[0] === NACK) onNack(room, from, idsOf(body));
+  if (frame[0] === NACK) onNack(room, from, idsOf(body));
+  else if (frame[0] === FOUND) onFound(room, from, jsonOf(body));
+  else if (frame[0] === MISS) onMiss(room, from, jsonOf(body));
+  else memberFrame(room, from, frame);
 }
 
 app.onContext(onContext);
@@ -1462,6 +1250,26 @@ seek.addEventListener("keydown", (e) => {
   if (!t || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
   e.preventDefault();
   seekTo((playPos(active) + (e.key === "ArrowLeft" ? -5 : 5)) / t.dur);
+});
+
+// The list's place goes to a library and back. What is typed is asked for once the typing
+// has paused, from the first title again.
+browseBtn.addEventListener("click", () => {
+  if (shelf) closeLibrary();
+  else if (active && librariesOf(active).length > 0) openLibrary(active, librariesOf(active)[0]);
+});
+libWho.addEventListener("change", () => {
+  if (shelf && librariesOf(shelf.room).includes(libWho.value)) openLibrary(shelf.room, libWho.value);
+});
+libQuery.addEventListener("input", () => {
+  clearTimeout(typing);
+  typing = setTimeout(() => {
+    const q = libQuery.value.trim().slice(0, MAX.title);
+    if (!shelf || q === shelf.q) return;
+    Object.assign(shelf, { q, titles: [], total: null });
+    askLibrary(0);
+    drawLibrary();
+  }, FIND_PAUSE_MS);
 });
 
 addBtn.addEventListener("click", () => fileInput.click());

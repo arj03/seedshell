@@ -26,7 +26,7 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -65,6 +65,7 @@ const relayPath = join(root, "node_modules", "seedrelay", "server.mjs");
 for (const [path, why] of [
   [join(root, "bundle", "chat.skb"), "run `npm run build` first"],
   [join(root, "bundle", "jam.skb"), "run `npm run build` first"],
+  [join(root, "bundle", "radio.skb"), "run `npm run build` first"],
   [join(root, "browser", "vendor", "host"), "run `npm run build` first"],
   [relayPath, "run `npm install` first"],
 ]) {
@@ -113,6 +114,11 @@ for (let i = 0; ; i++) {
 const profile = mkdtempSync(join(tmpdir(), "seedshell-e2e-"));
 /** Where the browser puts a file a view saves, each under the id its download was given. */
 const saved = mkdtempSync(join(tmpdir(), "seedshell-e2e-saved-"));
+/** The radio's: the directory of music it is pointed at, and where it keeps its key. */
+const music = mkdtempSync(join(tmpdir(), "seedshell-e2e-music-"));
+const radioHome = mkdtempSync(join(tmpdir(), "seedshell-e2e-radio-"));
+/** What the radio said, for a run that fails. */
+const radioSaid = [];
 const browser = spawn(browserPath, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${profile}`,
   "--no-first-run", "--disable-gpu", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
   "--autoplay-policy=no-user-gesture-required",
@@ -130,7 +136,7 @@ async function cleanup() {
   for (const p of procs) { try { p.kill(); } catch {} }
   server.close();
   await sleep(500);
-  for (const dir of [profile, saved]) {
+  for (const dir of [profile, saved, music, radioHome]) {
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch {}
   }
 }
@@ -283,6 +289,9 @@ const jamAudio = (tab) => jam(tab, "Number(document.getElementById('player').dat
 /** Click a button on a track's row in jam's playlist, by the track's title. */
 const jamTrack = (tab, title, label) => jam(tab, `[...document.querySelectorAll('#list .track')].find((li) => li.querySelector('.t-title').textContent === ${JSON.stringify(title)})
   .querySelector(${JSON.stringify(`button[title^="${label}"]`)}).click()`);
+/** Whether a track's row in jam's playlist can be started, by the track's title. */
+const jamPlayable = (tab, title) => jam(tab, `![...document.querySelectorAll('#list .track')].find((li) => li.querySelector('.t-title').textContent === ${JSON.stringify(title)})
+  .querySelector("button.start").disabled`);
 /** A FLAC file of a tone `seconds` long, as bytes: 16-bit mono at 44.1 or 96 kHz, every
  *  subframe VERBATIM, which is the samples as they are and so needs no compressor to
  *  write. Run in the view, not here: it is passed over as its own source, so it leans on
@@ -444,6 +453,18 @@ const reachFor = (post) => `(async () => {
   });
   document.documentElement.dataset.reach = JSON.stringify(out);
 })();`;
+
+/** The titles jam's open library shows, in order. */
+const jamTitles = (tab) => jam(tab, "[...document.querySelectorAll('#lib-list .t-title')].map((e) => e.textContent).join(' | ')");
+/** Type into the library's field, as a person would. */
+const jamSearch = (tab, typed) => jam(tab, `(() => {
+  const field = document.getElementById("lib-q");
+  field.value = ${JSON.stringify(typed)};
+  field.dispatchEvent(new Event("input"));
+})()`);
+/** Click a button on a title's row in jam's library, by the title. */
+const jamTitle = (tab, title, label) => jam(tab, `[...document.querySelectorAll('#lib-list .track')].find((li) => li.querySelector('.t-title').textContent === ${JSON.stringify(title)})
+  .querySelector(${JSON.stringify(`button[title^="${label}"]`)}).click()`);
 
 /** Click jam's seek bar this far along it. */
 const jamSeek = (tab, part) => jam(tab, `(() => {
@@ -818,6 +839,105 @@ try {
   await sleep(2000);
   check((await peerPill(A)).startsWith("0 peers"), "A: looking for a peer that is not there does not call the one that left");
 
+  // 26. the radio: a node with no page, in the room with a directory of music behind it. It
+  //     runs another bundle than jam, which claims the same protocol, so A's jam finds it
+  //     jamming there, and is told it has a library. A looks through it, narrows it by what
+  //     is typed, and has titles put in the room's list: the radio cuts each file where it
+  //     lies and adds the track itself, and A plays it from there, a piece at a time
+  mkdirSync(join(music, "Live at the Relay"));
+  writeFileSync(join(music, "Live at the Relay", "01 Opening.flac"), makeFlac(8));
+  writeFileSync(join(music, "Live at the Relay", "02 Closing.flac"), makeFlac(6));
+  writeFileSync(join(music, "sleeve notes.flac"), "not a FLAC file, whatever it is called");
+  writeFileSync(join(music, "cover.jpg"), "not music at all");
+  // What the views were refused in step 23 is logged; what counts here is what comes after.
+  const loggedBefore = errors.length;
+  /** The radio on `music`, in the room, under the same key each time it is started. */
+  const startRadio = () => {
+    const started = spawn(process.execPath, [join(root, "node", "radio.mjs"), music,
+      "--room", "e2e", "--relay", `ws://127.0.0.1:${relayPort}`, "--key", join(radioHome, "radio.key")], { stdio: ["ignore", "pipe", "pipe"] });
+    procs.push(started);
+    for (const out of [started.stdout, started.stderr]) out.on("data", (said) => radioSaid.push(String(said)));
+    return started;
+  };
+  let radio = startRadio();
+  await waitFor("A: links to the radio, through the relay", async () => (await peerPill(A)) === "1 peer · 1 via relay");
+  await waitFor("A: the shell names the radio by its nick", async () => (await page(A, text("room-list"))).includes("radio"));
+  await waitFor("A: jam finds the radio jamming, and is told it has a library", async () =>
+    (await jam(A, text("here"))) === "2 here" && !(await jam(A, "document.getElementById('browse').hidden")));
+  await jam(A, click("browse"));
+  await waitFor("A: the library opens in the list's place, with every title the directory holds", async () =>
+    (await jamTitles(A)) === "01 Opening | 02 Closing | sleeve notes" && (await jam(A, text("list-count"))) === "3 titles"
+    && (await jam(A, "document.getElementById('list').hidden")));
+  check(/^Live at the Relay · /.test(await jam(A, "document.querySelector('#lib-list .t-sub').textContent")), "A: each title says the folder it is in");
+  await jamSearch(A, "relay clos");
+  await waitFor("A: what is typed narrows it to the titles that match every word", async () =>
+    (await jamTitles(A)) === "02 Closing" && (await jam(A, text("list-count"))) === "1 match");
+  await jamTitle(A, "02 Closing", "Add");
+  await waitFor("A: a title asked for is in the list, added by the radio", async () => (await jamList(A)) === "second | 02 Closing"
+    && /radio added 02 Closing/.test(await jam(A, text("logs"))));
+  await jamSearch(A, "");
+  await waitFor("A: and with nothing typed the library is all there again", async () => (await jamTitles(A)).startsWith("01 Opening | "));
+  await jamTitle(A, "sleeve notes", "Add");
+  await waitFor("A: a title that is not FLAC or Ogg Vorbis is not added, and the radio says why", async () =>
+    /sleeve notes was not added: only FLAC and Ogg Vorbis files can be added/.test(await jam(A, text("toasts"))));
+  await jamTitle(A, "01 Opening", "Play");
+  await waitFor("A: a title played from the library is added, and started for the room", async () =>
+    (await jamList(A)) === "second | 02 Closing | 01 Opening" && (await jam(A, text("np-title"))) === "01 Opening");
+  await waitFor("A: and sounds, fetched from the radio a piece at a time", async () => (await jamAudio(A)) > 0.2, 30000);
+  await jam(A, click("browse"));
+  check((await jam(A, "document.getElementById('library').hidden")) && !(await jam(A, "document.getElementById('list').hidden")),
+    "A: the library's button leads back to the list");
+
+  // 27. the radio keeps the room. A reloads, the only tab in it, and so loses all it held:
+  //     the chat, the reactions and the list come back from the radio, which had them from
+  //     A, and so does the music the radio added. A track whose file was a tab's is gone
+  //     with the tab
+  await send("Page.reload", {}, A.sid);
+  await waitFor("A: jam is back after a reload, and shown", async () => (await appShown(A)) === "Jam v1");
+  await waitFor("A: the room's chat, reactions and list come back from the radio", async () =>
+    (await jamList(A)) === "second | 02 Closing | 01 Opening" && /shall we jam\?/.test(await jam(A, text("logs"))) && (await jam(A, chip)) === "👍1", 30000);
+  await waitFor("A: a track a tab added is nobody's to serve once the tabs are gone", async () =>
+    /nobody here has it/.test(await jam(A, "document.querySelector('#list .track .t-sub').textContent")));
+  check(!(await jamPlayable(A, "second")), "A: and it cannot be started");
+  await jamTrack(A, "02 Closing", "Play");
+  await waitFor("A: and plays what the radio added, which the radio still serves", async () =>
+    (await jam(A, text("np-title"))) === "02 Closing" && (await jamAudio(A)) > 0.2, 30000);
+  check(errors.slice(loggedBefore).every((e) => expected.test(e)), "jam logged no error beside the radio");
+
+  //     and when the radio goes, so does its library. A track nobody here has is passed
+  //     over: with `second` moved to the list's end, the room plays the radio's two, which
+  //     A fetched as it played, and stops at it rather than sound nothing for its length
+  await jamTrack(A, "second", "Move down");
+  await waitFor("A: moves the track nobody has down the list", async () => (await jamList(A)) === "02 Closing | second | 01 Opening");
+  await jamTrack(A, "second", "Move down");
+  await waitFor("A: to its end", async () => (await jamList(A)) === "02 Closing | 01 Opening | second");
+  radio.kill();
+  await waitFor("A: the radio is gone, and the library with it", async () =>
+    (await peerPill(A)).startsWith("0 peers") && (await jam(A, "document.getElementById('browse').hidden")));
+  let passedOver = true;
+  await waitFor("A: the room plays on, and stops where nobody has the next track", async () => {
+    const on = await jam(A, text("np-title"));
+    if (on === "second") passedOver = false;
+    return on === "Nothing playing";
+  }, 40000);
+  check(passedOver, "A: passing over the track nobody has, rather than playing it in silence");
+
+  // 28. the radio started again on the same directory, under the same key. It kept nothing,
+  //     and finds the files of the tracks it added by the size each track says its file
+  //     was. A reloads, and so holds nothing: what it plays is fetched from the radio
+  radio = startRadio();
+  await waitFor("A: links to the radio started again", async () => (await peerPill(A)) === "1 peer · 1 via relay");
+  await waitFor("the radio holds the tracks it added again, from the same files", async () =>
+    /holds 01 Opening again/.test(radioSaid.join("")) && /holds 02 Closing again/.test(radioSaid.join("")), 30000);
+  await send("Page.reload", {}, A.sid);
+  await waitFor("A: jam is back after a reload, and shown", async () => (await appShown(A)) === "Jam v1");
+  await waitFor("A: the list comes back from the radio", async () => (await jamList(A)) === "02 Closing | 01 Opening | second", 30000);
+  await waitFor("A: what the radio added can be started again, and what nobody has cannot", async () =>
+    (await jamPlayable(A, "01 Opening")) && !(await jamPlayable(A, "second")));
+  await jamTrack(A, "01 Opening", "Play");
+  await waitFor("A: and it plays, fetched from the radio", async () =>
+    (await jam(A, text("np-title"))) === "01 Opening" && (await jamAudio(A)) > 0.2, 30000);
+
 } catch (err) {
   failure = err;
 }
@@ -830,6 +950,7 @@ if (failure) {
     console.log(`\n  ${tab.name}'s Diagnostics:\n${lines.map((l) => `      ${l}`).join("\n")}`);
   }
   if (errors.length > 0) console.log(`\n  logged as errors by the pages:\n${[...new Set(errors)].map((e) => `      ${e}`).join("\n")}`);
+  if (radioSaid.length > 0) console.log(`\n  the radio said:\n${radioSaid.join("").trimEnd().split("\n").map((l) => `      ${l}`).join("\n")}`);
 }
 await cleanup();
 console.log(failure ? "\ne2e: FAILED" : "\ne2e: all checks passed");
