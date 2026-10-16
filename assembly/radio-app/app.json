@@ -5,6 +5,5 @@
   "version": "v1",
   "description": "a jam room's library: a directory of music, for the room to play",
   "protocols": ["jam"],
-  "requires": ["_net"],
   "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "../guest-lib/room-pipe.js", "../jam-app/guest.js"]
 }

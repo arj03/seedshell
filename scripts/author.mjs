@@ -39,13 +39,13 @@ export function nextVersion(app) {
     const v = Number(readFileSync(path, "utf8").trim());
     if (Number.isInteger(v) && v > 0) return v + 1;
   } else if (!minted) {
-    // The dangerous case: a persisted key (an established namespace) but no record of how
-    // far its version has been published. Warn loudly rather than quietly restart at 1.
+    // A persisted key (an established namespace) but no record of how far this app's
+    // version has been published: an app built for the first time, or a count that was
+    // lost. Only the author knows which, so say it rather than quietly start at 1.
     console.warn(
-      `  ⚠ author key exists but no version high-water mark (${path}) — ` +
-      `restarting version at 1.\n` +
-      `    If you have already shipped bundles under this author, put the real ` +
-      `last-shipped version number in ${path} and re-run.`);
+      `  ${app}: no version count yet (${path}), so this is version 1.\n` +
+      `    If ${app} has shipped under this author before, put the last version shipped ` +
+      `in that file and build again.`);
   }
   return 1;
 }

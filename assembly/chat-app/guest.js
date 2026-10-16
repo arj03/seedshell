@@ -6,10 +6,10 @@
 // and guest-lib/context.js, the node's context, the rooms a guest reads out of it, and the
 // entrypoint that tells its two callers apart (`guest.peer`, `guest.view`).
 
-/** The wire protocol every chat app speaks (§12.10), the one id in app.json `protocols`.
- *  It names the conversation, not the code: two peers running different versions, or
- *  different authors' chat apps, interoperate because both claim it, and a frame says only
- *  which protocol it is. */
+/** The wire protocol every chat app speaks (§12.10), the one id the app claims, which its
+ *  label spells. It names the conversation, not the code: two peers running different
+ *  versions, or different authors' chat apps, interoperate because both claim it, and a
+ *  frame says only which protocol it is. */
 const CHAT = "chat";
 
 /** This app's module, by its name in app.json `modules`: a pure transform from

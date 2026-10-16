@@ -65,6 +65,7 @@ const relayPath = join(root, "node_modules", "seedrelay", "server.mjs");
 for (const [path, why] of [
   [join(root, "bundle", "chat.skb"), "run `npm run build` first"],
   [join(root, "bundle", "jam.skb"), "run `npm run build` first"],
+  [join(root, "bundle", "hello.skb"), "run `npm run build` first"],
   [join(root, "bundle", "radio.skb"), "run `npm run build` first"],
   [join(root, "browser", "vendor", "host"), "run `npm run build` first"],
   [relayPath, "run `npm install` first"],
@@ -641,6 +642,25 @@ try {
   // (and its last dial of the old tab fails). Anything else is a real one.
   const expected = /^\[transport\] link \d+ .*down: |^WebSocket connection to .*splice=/;
   check(errors.every((e) => expected.test(e)), "a reload logs nothing but the old tab's links going down");
+
+  // 13b. hello, the least an app is: an app.json and a page, whose guest the builder gave it.
+  //      It installs beside chat, says what is typed to the room under the nick its view
+  //      read out of the context, and is removed again
+  const hello = (tab, expression) => viewTitled(tab, "Hello", expression);
+  for (const tab of [A, B]) {
+    await drop(tab, "hello.skb");
+    await waitFor(`${tab.name}: hello installs beside chat`, async () => (await appShown(tab)) === "hello" && (await frameCount(tab)) === 2);
+    await waitFor(`${tab.name}: hello's view hears of the room`, async () =>
+      (await hello(tab, "document.getElementById('msg').placeholder")) === "Say something to #e2e");
+  }
+  await hello(A, "document.getElementById('msg').value = 'hello from A'; document.getElementById('form').requestSubmit()");
+  await waitFor("B: hello shows what A cast to the room, under A's nick", async () =>
+    (await hello(B, text("log"))).includes("#e2e annie: hello from A"));
+  for (const tab of [A, B]) {
+    await page(tab, `[...document.querySelector('#app-list').children].find((li) => li.textContent.includes('serves “hello”'))
+      .querySelectorAll('button').forEach((b) => { if (b.textContent === 'Remove') b.click(); })`);
+    await waitFor(`${tab.name}: hello is removed, and chat stays`, async () => (await frameCount(tab)) === 1);
+  }
 
   // 14. jam installs beside chat: another label and another protocol, so both stand, each
   //     with a view of its own, in the shell that until now hosted only chat

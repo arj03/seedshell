@@ -312,7 +312,7 @@ try {
 //    scripts/build-app-bundle.mjs signs (this test assembles its own so it signs under a
 //    key it holds, rather than shelling out)
 const appDir = (name) => resolve(here, "../assembly", name);
-const chatSource = readAppSource(appDir("chat-app"), guestOpFraming);
+const chatSource = await readAppSource(appDir("chat-app"), guestOpFraming);
 const chat = authorBundle(sodium, authorA, { ...chatSource, version: 1 });
 const CHAT_PROTO = chat.manifest.protocols[0];
 let chatApp = null;   // A's handle into its chat app's guest
@@ -577,7 +577,7 @@ const ASK_CAST = 1, ASK_TELL = 2, RENDER_FRAME = 1;   // the pipe's asks, and it
 const pipeFrame = (room, ...body) => concat(fromHex(room), ...body);
 let jamA = null;   // A's handle into its jam app's guest
 try {
-  const jam = authorBundle(sodium, authorA, { ...readAppSource(appDir("jam-app"), guestOpFraming), version: 1 });
+  const jam = authorBundle(sodium, authorA, { ...await readAppSource(appDir("jam-app"), guestOpFraming), version: 1 });
   const JAM_PROTO = jam.manifest.protocols[0];
   const facts = appFacts(jam.manifest);
   assert(facts.name === "Jam" && typeof facts.ui === "string", "the manifest carries jam's row and view");
@@ -625,18 +625,16 @@ try {
   ok(`jam: cast and tell scoped to a room, and a ${block.length / 1024} KB block named by its hash at both ends`);
 } catch (err) { fail("jam app", err); }
 
-// 8b. the room pipe on its own: an app whose state lives in its view writes no guest. Its
-//     app.json lists three library files, and they are a guest whole. This one is signed
-//     from them directly, as the builder would from such a list, with the protocol the pipe
-//     sends under where the builder writes it (`APP.protocols`).
+// 8b. the room pipe on its own: the hello app (assembly/hello-app), whose state lives in its
+//     view. Its app.json names no guest, no protocol and no reach, so the builder gives it
+//     the room pipe, a claim on its own label, and the network, and tells the guest the
+//     protocol the pipe sends under (`APP.protocols`).
 try {
-  const lib = (name) => readFileSync(resolve(here, "../assembly/guest-lib", name), "utf8").replace(/\r\n/g, "\n");
-  const PIPE_PROTO = "pipe/smoke";
-  const pipe = authorBundle(sodium, authorA, {
-    app: "pipe", version: 1, protocols: [PIPE_PROTO], modules: [], guestRequires: [NET_PROTO],
-    guestConfig: { protocols: [PIPE_PROTO], shell: { api: APP_API, name: "Pipe" } },
-    guestSource: [guestOpFraming(), lib("net.js"), lib("context.js"), lib("room-pipe.js")].join("\n"),
-  });
+  const pipe = authorBundle(sodium, authorA, { ...await readAppSource(appDir("hello-app"), guestOpFraming), version: 1 });
+  const PIPE_PROTO = pipe.manifest.protocols[0];
+  assert(pipe.manifest.protocols.join() === pipe.manifest.app && pipe.manifest.guest.config.protocols.join() === PIPE_PROTO
+    && pipe.manifest.guest.requires.join() === NET_PROTO && pipe.manifest.modules.length === 0,
+    "an app.json that names none claims its own label, reaches the network, and has no module");
   const pipeRenders = [];
   consent(pipe.blob);
   const pipeA = await A.install(pipe.blob);
@@ -661,7 +659,7 @@ try {
   assert(pipeRenders.length === 2 && frames.every((f) => f.type === RENDER_FRAME && f.from === peerA),
     "a peer's frame is passed to the view with its sender in front, and only from a member of its room");
   assert(frames[0].frame === toHex(cast) && frames[1].frame === toHex(tell), "a cast and a tell arrive byte for byte, under the app's own protocol");
-  ok("the room pipe is a guest whole: cast and tell scoped to a room, with no guest code of the app's own");
+  ok("hello, an app.json and a page: the room pipe is its guest, with cast and tell scoped to a room");
 } catch (err) { fail("the room pipe on its own", err); }
 
 // 8c. the radio app (assembly/radio-app): another bundle, under another label, that claims
@@ -670,7 +668,7 @@ try {
 //     has one holder, so on B it stands where jam stood, and what A's jam casts reaches it:
 //     two apps, one protocol.
 try {
-  const radio = authorBundle(sodium, authorA, { ...readAppSource(appDir("radio-app"), guestOpFraming), version: 1 });
+  const radio = authorBundle(sodium, authorA, { ...await readAppSource(appDir("radio-app"), guestOpFraming), version: 1 });
   const facts = appFacts(radio.manifest);
   const JAM_PROTO = jamA.manifest.protocols[0];
   assert(radio.manifest.app !== jamA.manifest.app && radio.manifest.protocols.length === 1 && radio.manifest.protocols[0] === JAM_PROTO,

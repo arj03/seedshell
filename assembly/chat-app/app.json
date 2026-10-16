@@ -4,9 +4,7 @@
   "name": "Chat",
   "version": "v2",
   "description": "text + images, rooms and direct chats",
-  "protocols": ["chat"],
-  "requires": ["_net"],
   "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "guest.js"],
   "ui": "ui.html",
-  "modules": { "chat": "../../build/chat-app.wasm" }
+  "modules": { "chat": "index.ts" }
 }

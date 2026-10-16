@@ -1,9 +1,10 @@
 // A guest, whole: a pipe scoped to a room, for an app whose state lives in its view. It
 // follows net.js and context.js in an app.json's `guest` list, and an app that needs no
-// more than this names no guest file of its own. What is left to a guest here is the part a
-// view cannot be trusted with or cannot do: who a frame goes to, and whether a peer's frame
-// is from someone in the room it names. The view's half is assembly/view-lib/app.js
-// (`cast`, `tell`, `onFrame`).
+// more than this names no guest at all: the builder gives it these three, as it does hello
+// (scripts/app-source.mjs). What is left to a guest here is the part a view cannot be
+// trusted with or cannot do: who a frame goes to, and whether a peer's frame is from
+// someone in the room it names. The view's half is assembly/view-lib/app.js (`cast`,
+// `tell`, `onFrame`).
 //
 // An app that needs more puts a guest of its own behind this file and sets `guest.peer` or
 // `guest.view` again (context.js), with `pipePeer` and `pipeView` for the rest: jam's hashes
