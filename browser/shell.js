@@ -472,17 +472,14 @@ function setRelayPill(state, label) {
 // standing.
 //
 // What the transport tells the page comes the other way (bootShell's `onStatus`): the
-// relay's state, who is linked and how each is reached, each time any of it changes. One
-// byte for the relay (`showRelay`), then `[key 32][direct u8]` for each linked peer, 1 once
-// the peer's link has moved off the relay to WebRTC and 0 while the relay still forwards it
-// (seedkernel §12.7). So the page hears of a change as it happens, and asks nothing.
-function onStatus(status) {
-  relayNow = status[0];
+// relay's state, who is linked and how each is reached, each time any of it changes: the
+// relay's state (`showRelay`), and each linked peer's key with whether its link has moved
+// off the relay to WebRTC (seedkernel §12.7). So the page hears of a change as it happens,
+// and asks nothing.
+function onStatus({ relay, linked }) {
+  relayNow = relay;
   showRelay();
-  routesNow = [];
-  for (let off = 1; off + 33 <= status.length; off += 33) {
-    routesNow.push({ id: bytesToHex(status.subarray(off, off + 32)), direct: status[off + 32] === 1 });
-  }
+  routesNow = linked.map(({ key, direct }) => ({ id: bytesToHex(key), direct }));
   followPeers();
 }
 

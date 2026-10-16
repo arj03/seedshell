@@ -102,12 +102,12 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     return called ? `${called} (${short(key)})` : short(key);
   };
 
-  // One relay state, then `[key 32][direct u8]` for each linked peer (seedkernel §12.6).
-  function onStatus(status) {
+  // The relay's state and the linked peers (seedkernel §12.6): every link of this node's
+  // is relayed, so how each is reached is not kept.
+  function onStatus({ relay, linked }) {
     const relayWas = relayNow, linkedWas = linkedNow;
-    relayNow = status[0];
-    linkedNow = [];
-    for (let off = 1; off + 33 <= status.length; off += 33) linkedNow.push(toHex(status.subarray(off, off + 32)));
+    relayNow = relay;
+    linkedNow = linked.map(({ key }) => toHex(key));
     if (!standing) return;
     if (relayNow !== relayWas && !joining) sayRelay();
     for (const key of linkedNow) if (!linkedWas.includes(key)) say(`linked to ${label(key)}`);
