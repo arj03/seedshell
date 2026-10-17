@@ -110,7 +110,7 @@ Open the page in two tabs or two browsers and join the same room in both on the
 | `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
 | `npm run e2e` | The shell in a real headless browser, two tabs and a relay (needs `npm run build` first). Run it after a change to the shell or an app's view. |
-| `npm run relay` | Starts the `seedrelay` relay on port 8080. |
+| `npm run relay` | Starts the `seedrelay` relay on port 8080, with STUN on UDP 3478 and 3479. |
 | `npm run radio -- <dir>` | Starts a [radio](#the-radio): a node with no page, in a room on the relay, with the music under `<dir>` for its library (needs Node 22 or later, and `npm run build` first). |
 | `npm run serve` | Re-vendors, then serves `browser/` on port 3000 with caching disabled. |
 | `npm run clean` | Deletes `browser/vendor/`. |
