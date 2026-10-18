@@ -276,7 +276,7 @@ function merge(room, doc) {
       have.gone = true;
       have.goneAt = performance.now();
       changed.gone.push(have);
-      changed.freed.push(...forgetTrack(have));
+      changed.freed.push(...forgetTrack(have, room));
       changed.list = true;
     }
     if (later(t.v, t.vBy, have.v, have.vBy)) {
@@ -390,25 +390,30 @@ function greet(room) {
 }
 
 /** Let go of a track's audio: each block no track still in a list names. Answers them. */
-function forgetTrack(t) {
+function forgetTrack(t, room) {
   t.whole = false;
+  room?.holders.delete(t.id);
   if (!t.blocks) return [];
   const kept = new Set();
-  for (const room of rooms.values()) {
-    for (const other of room.tracks.values()) {
+  for (const r of rooms.values()) {
+    for (const other of r.tracks.values()) {
       if (other === t || !other.blocks || other.gone) continue;
       kept.add(other.head);
       for (const b of other.blocks) kept.add(b);
     }
   }
   const freed = [t.head, ...t.blocks].filter((b) => !kept.has(b));
-  for (const b of freed) store.delete(b);
+  for (const b of freed) {
+    store.delete(b);
+    room?.blocks.delete(b);
+    for (const r of rooms.values()) r.blocks.delete(b);
+  }
   return freed;
 }
 
 function leaveRoom(room) {
   rooms.delete(room.id);
-  for (const t of room.tracks.values()) forgetTrack(t);
+  for (const t of room.tracks.values()) forgetTrack(t, room);
 }
 
 // ── this node's own changes ─────────────────────────────────────────────
@@ -533,7 +538,10 @@ function memberContext(ctx) {
     for (const id of [...room.peers.keys()]) {
       if (there(id)) continue;
       room.peers.delete(id);
-      for (const set of room.holders.values()) set.delete(id);
+      for (const [track, set] of room.holders) {
+        set.delete(id);
+        if (!set.size) room.holders.delete(track);
+      }
     }
     for (const id of [...room.libraries.keys()]) if (!there(id)) room.libraries.delete(id);
     for (const id of room.members) {

@@ -712,6 +712,8 @@ const MAX_QUEUED_RENDERS = 512;
 
 function mountView(rec) {
   if (!rec.ui) return;
+  // The parent page's frame-src blob: (shell.html) is what stops a view navigating itself
+  // to a server; guardView's own frame-src only governs frames the view makes. Keep it.
   const frame = document.createElement("iframe");
   frame.className = "app-frame hidden";
   frame.setAttribute("sandbox", "allow-scripts allow-forms allow-downloads");
