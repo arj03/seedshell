@@ -3,16 +3,15 @@
 // this file can only reach what seedkernel has deliberately made public — the
 // import map in shell.html resolves them to the vendored build. If a future
 // seedkernel change breaks the shell, it broke a public export, which is the point.
-import sodium from "seedkernel-wasm/libsodium";
-// bootShell is the assembly itself (§12.8): platform members defaulted, the
-// transport bundle pinned to its own author, the channel adapter built from the
-// `transport` options passed to it. The page's admit is then ONLY its consent gate —
+// The page's loader: it runs the host blob's own script on the browser platform, the host
+// seedkernel's Node and native nodes run (§12.9), and the node is assembled by that host's
+// `standUp`: the transport bundle pinned to its own author, the channel adapter built from
+// the `transport` options passed to it. The page's admit is then ONLY its consent gate —
 // who may be the network is the assembly's, so nobody can lose it by forgetting it.
-import { bootShell } from "seedkernel-wasm/shell-core";
+import { browserHost } from "seedkernel-wasm/platform-web";
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
 // arguments, which is what the host's own door into the network takes (see `netOp`).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
-import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 // The sockets: a WebSocket for the relay the transport meets and links peers through, and
 // seedkernel's WebRTC seam for the peer connections it then moves them to (§12.7).
@@ -154,14 +153,22 @@ function hexToBytes(hex) {
 const HEX32_RE = /^[0-9a-f]{64}$/;
 
 shellPrint("Starting the shell...", "sys");
-// Core libsodium + ML-DSA-65, mixed onto `sodium` before anything below touches
-// it — bootShell's verifyBundle needs the PQ signature half for ANY bundle, and
-// verifyBundle is synchronous, so this can't be lazy (seedkernel's crypto-browser.ts).
+// The host blob this page is served (seedkernel's build/host.skb, vendored): the host
+// script, the realm engine every guest runs on, and the host's crypto, libsodium and
+// ML-DSA-65, which run on WebAssembly here as on every seedkernel target. Its `sodium` is
+// the page's too, ready before anything below touches it: verifyBundle needs the PQ
+// signature half for ANY bundle, and it is synchronous.
 //
 // This runtime only VERIFIES suite 0x02 bundle envelopes (§12.4, §14.1). Bundle
 // authoring is offline and lives behind seedkernel-wasm/bundle-author, which is not
 // shipped in the browser runtime tree.
-await loadCrypto(sodium, new URL("./vendor/", import.meta.url));
+const hostBlobUrl = new URL("./vendor/host.skb", import.meta.url);
+const hostBlobRes = await fetch(hostBlobUrl, { cache: "no-store" });
+// A page that does not serve the file answers with an error page, which would otherwise
+// fail later as a malformed blob.
+if (!hostBlobRes.ok) throw new Error(`${hostBlobUrl.href} was not served (HTTP ${hostBlobRes.status})`);
+const host = browserHost({ hostBlob: new Uint8Array(await hostBlobRes.arrayBuffer()) });
+const sodium = host.sodium;
 
 // The host (its shell, admission policy and `install`) is assembled once the
 // identity exists — see the boot sequence below. It is declared here because handlers
@@ -259,12 +266,12 @@ function saveContacts() {
 // connections.
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
 
-// Assemble the shared shell now that the identity exists — via bootShell, the ONE
-// assembly (§12.8). The platform is a browser seam: sodium, our identity, a
-// WebAssembly-backed module builder, an in-memory freshness store — all defaulted by
-// bootShell — and the channel adapter, which bootShell CONSTRUCTS from the `transport`
-// options (identity taken from the top-level fields, never restated) and returns with
-// the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
+// Assemble the shared shell now that the identity exists — via the host's `standUp`, the
+// ONE assembly (§12.8, §12.9). The browser platform supplies the host blob's crypto and
+// realm engine, private modules in workers, and an in-memory store and freshness marks;
+// the page adds its identity and the channel adapter, which the assembly CONSTRUCTS from
+// the `transport` options (identity taken from the top-level fields, never restated) and
+// returns with the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
 // to the signed bundle, and so does the address book — it lives in that bundle's own realm
 // now (§12.10), and the page writes nothing to it: a peer here is met in the relay room the
 // transport joins, and linked by it.
@@ -283,8 +290,7 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // `relay` op: it registers there, joins the room and links the peers it meets.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
-// app's, and each installed app's — is bootShell's default (seedkernel's qjs.wasm on
-// WebAssembly), imported lazily on the first realm.
+// app's, and each installed app's — is the host blob's qjs.wasm, on WebAssembly.
 //
 // The page serves no name of its own: dispatch is a single claim → bundle
 // slot map (seedkernel §12.10), and there is no owner but a signed bundle. `admit` is
@@ -292,8 +298,9 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // offers boot bundle's author+app pin (below — deployment-shipped bytes, not a consent
 // prompt) and the user-consent gate for every other app. The transport never reaches
 // this gate: bootShell installs it by selection (§12.5).
-const booted = await bootShell({
-  sodium,
+const booted = await host.standUp({
+  // Where the store keeps this node's files, in the platform's memory.
+  dir: "shell",
   identity: myKeys,
   // The transport asks the relay a peer is linked through for STUN (§12.7). A room
   // keeps its members linked, so links do not idle out; the page redials a member whose

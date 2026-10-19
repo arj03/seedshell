@@ -61,14 +61,13 @@ the shell makes into the runtime goes through a published entry point of
   ├── seedrelay/
   └── seedshell/    ← this repo
   ```
-- **clang**, for seedkernel's post-quantum C → wasm step.
 
 ### Build and run
 
 ```sh
 # 1. build the seedkernel checkout it depends on (transport bundle + host + minified,
-#    browser core libsodium and PQ wasm)
-cd ../seedkernel/WASM && npm install && npm run build:browser
+#    and the host blob that carries the realm engine and the host's crypto)
+cd ../seedkernel/WASM && npm install && npm run build
 
 # 2. build the apps (chat, jam, hello and the radio, + the offers and shell boot
 #    bundles) and vendor the runtime
@@ -107,7 +106,7 @@ Open the page in two tabs or two browsers and join the same room in both on the
 | `npm run build` | Signs every app, signs the offers and shell boot bundles, then vendors the runtime. |
 | `npm run build:apps` | Signs each directory under `assembly/` with an `app.json` into `bundle/<app>.skb` (`chat.skb`, `hello.skb`, `jam.skb`, `radio.skb`), compiling chat's AssemblyScript module on the way. `npm run build:apps -- assembly/jam-app` signs just the one. |
 | `npm run build:boot-bundles` | Signs the offers and shell apps into `bundle/offers.skb` and `bundle/shell.skb` and generates `browser/offers-bundle.js` and `browser/shell-bundle.js`. |
-| `npm run vendor` | Copies the built seedkernel host, libsodium and QuickJS into `browser/vendor/`. |
+| `npm run vendor` | Copies the built seedkernel host and its host blob (QuickJS and the host's crypto) into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
 | `npm run e2e` | The shell in a real headless browser, two tabs and a relay (needs `npm run build` first). Run it after a change to the shell or an app's view. |
 | `npm run relay` | Starts the `seedrelay` relay on port 8080, with STUN on UDP 3478 and 3479. |
@@ -312,7 +311,7 @@ nick is a peer's own word.
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs every app directory under `assembly/`, or the ones it is named, into `bundle/<app>.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and shell apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/author.mjs` | The author key and each app's version count, which both builders sign through: whichever runs first mints the key. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
+| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob (`build/host.skb`: the QuickJS realm engine and the host's crypto). Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app, and a page notice and a call signal through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, a cast and a tell through hello, whose guest is the room pipe and nothing else, and puts the radio's bundle where jam stood on one shell, to hear the other's jam. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then hello beside chat, a line from one tab shown in the other, and removed. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Then one tab removes the other as its peer and hangs up, and the other still hears of it. Last the radio, started on a directory the test fills: a tab finds its library, searches it, has titles put in the list and plays one, fetched from the radio, and after a reload gets the room back from the radio alone. When the radio goes, its tracks cannot be played and the room passes over them, and a radio started again on the same directory serves them again. The FLAC files it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `browser/vendor/` when a rebuild isn't taking. |
@@ -834,25 +833,22 @@ refused while the first holds `chat` — remove the first to install it.
 
 ## The seedkernel surface the shell uses
 
-Eleven published entry points of `seedkernel-wasm`, across the browser shell and the
-build/smoke scripts:
+Eleven published entry points of `seedkernel-wasm`, across the browser shell, the
+headless Node shell and the build/smoke scripts:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders and the headless smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` — the one assembly (§12.8): the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the page asks the transport anything. Its `onStatus` option is how the page is told the relay's state, who is linked, and whether directly or through the relay, each time any of it changes: the relay pill, the peer pill, the peer list and what the apps are told follow it. |
-| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); browser boot gets the same artifact through `bootShell`. |
+| `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders, the radio, and the headless smoke test's signing. |
+| `seedkernel-wasm/platform-web` | `browserHost` — the page's loader: it runs the host blob's own script on the browser platform (the blob's realm engine and crypto on WebAssembly, private modules in workers, an in-memory store), which is why the page's CSP allows `'unsafe-eval'`. Its host's `standUp` is the one assembly (§12.8, §12.9) the page and the smoke test boot through: the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the page asks the transport anything. Its `onStatus` option is how the page is told the relay's state, who is linked, and whether directly or through the relay, each time any of it changes: the relay pill, the peer pill, the peer list and what the apps are told follow it. The host's `sodium` is the page's crypto too. |
+| `seedkernel-wasm/host.skb` | The host blob, vendored for the page and read by the smoke test. |
+| `seedkernel-wasm/shell-core` | `bootShell` in the headless Node shell (`node/shell.mjs`). |
+| `seedkernel-wasm/transport-bundle` | `transportBundleBytes()` and `TRANSPORT_SERVICE` — the seedkernel-shipped transport bundle as raw bytes, and the local service id it claims, used by the headless smoke assertions (§12.6); the boot gets the same artifact through the assembly. |
 | `seedkernel-wasm/bundle` | `verifyBundle` — the one call that unpacks and checks an offered bundle (`peekBundle`) — and `genesisHash`, the hash the consent gate's digest of a whole bundle is built from. The browser only verifies; peer attribution uses its node public key. |
 | `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
 | `seedkernel-wasm/net-rtc` | `RtcNetwork` — the WebRTC `ChannelFactory`: it holds the transport's peer connections, which the transport negotiates over links made through the relay (§12.7). |
 | `seedkernel-wasm/net-ws` | `WsNetwork` — the WebSocket the transport opens to the relay. |
 | `seedkernel-wasm/socket-seam` | `combineChannels` — both factories behind one driver, passed as `transport.channels`. |
 | `seedkernel-wasm/op-frame` | `writeOp` — the signed apps' own operation framing for local guest invocations — and `OpArgs`, the transport bundle's argument writer, paired with its reader so a host-side call cannot drift from what the guest parses. |
-| `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides. |
-| `seedkernel-wasm/libsodium` | The browser libsodium build. |
-
-The QuickJS realms need no import-map entry: the vendored host loads its realm engine
-by relative import and fetches seedkernel's `qjs.wasm` from `browser/vendor/browser/`.
 
 The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
 the transport bundle speaks its control wire, registering through its `relay` operation
@@ -925,7 +921,7 @@ living out here.
   `npm run clean && npm run build` starts from nothing.
 - **`npm run vendor` refuses with a staleness error.** seedkernel's `build/` is
   newer than its `build-min/`, which happens when you rerun its `tsc` without
-  minifying. Rerun `npm run build:browser` in `../seedkernel/WASM`.
+  minifying. Rerun `npm run build` in `../seedkernel/WASM`.
 - **`seedkernel-wasm not found`.** The sibling checkouts
   are missing or misnamed; see [Prerequisites](#prerequisites).
 - **`npm run smoke` can't find a boot bundle.** Run `npm run build` first.

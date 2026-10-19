@@ -8,15 +8,10 @@
 // of entry points. The minified tree is what seedstore's p2p.html vendors too —
 // same convention across both apps — with the readable `build/` as a fallback.
 //
-// libsodium ships alongside because libsodium-wrappers.mjs resolves both its core
-// module and its .wasm relative to its own URL (`new URL('./libsodium.wasm',
-// import.meta.url)`), so the three files must stay in one directory.
-//
-// The QuickJS realm engine is vendored too: the transport bundle the shell admits runs
-// as a confined guest program, on seedkernel's qjs.wasm, which the realm factory
-// (host/engine-web.js) fetches from `../../browser/` relative to itself. So the vendored
-// tree keeps seedkernel's own layout: the host in vendor/seedkernel/, the engine in
-// vendor/browser/. Seedstore's build-browser-demo.mjs stages the same pair.
+// Beside it goes seedkernel's host blob (build/host.skb): the realm engine every guest
+// runs on and the host's crypto, which the page fetches and hands to the browser platform
+// (shell.js). The same blob the Node and native nodes run, so the page carries no crypto
+// or engine of its own.
 
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -99,33 +94,21 @@ mkdirSync(vendor, { recursive: true });
 
 // The whole minified tree: host/ and services/ (host modules import ../services/* by
 // relative path) plus the top-level ws/forwarder entry files, unused by the shell but
-// part of the same tree. libsodium and mldsa65.wasm live in seedkernel's
-// browser/ dir and are copied separately, below.
+// part of the same tree.
 cpSync(hostSrc, resolve(vendor, "seedkernel"), { recursive: true });
 
-for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
-  const src = resolve(pkgRoot, "browser", f);
-  if (!existsSync(src)) {
-    console.error(`missing ${f} — in the seedkernel checkout: cd WASM && npm run build:browser-sodium`);
-    process.exit(2);
-  }
-  cpSync(src, resolve(vendor, f));
-}
-
-// ML-DSA-65 for manifest suite 0x02 (§12.4). The same artifact Node reads and the native
-// binary embeds, so the shell admits exactly the bundles they admit; it fetches the file
-// by URL rather than importing it, so it does not need to sit beside a JS module.
+// The host blob: qjs.wasm, libsodium and ML-DSA-65 (manifest suite 0x02, §12.4), the same
+// bytes the Node and native nodes run, so the shell admits exactly the bundles they admit.
+// ML-KEM-768 is private content of the signed transport bundle; no loose browser artifact
+// is needed for it.
 {
-  const src = resolve(pkgRoot, "browser/mldsa65.wasm");
+  const src = resolve(rawDir, "host.skb");
   if (!existsSync(src)) {
-    console.error("missing mldsa65.wasm — in the seedkernel checkout: cd WASM && npm run build:pq");
+    console.error("missing build/host.skb — in the seedkernel checkout: cd WASM && npm run build");
     process.exit(2);
   }
-  cpSync(src, resolve(vendor, "mldsa65.wasm"));
+  copyFileSync(src, resolve(vendor, "host.skb"));
 }
-
-// ML-KEM-768 is private content of the signed transport bundle now; no loose
-// browser artifact is needed here.
 
 // ── vendor seedrelay's room client ──────────────────────────────────────────
 // Rooms are the app's: the page meets peers in a relay room itself and hands them to the
@@ -138,20 +121,6 @@ if (!existsSync(roomsSrc)) {
 }
 mkdirSync(resolve(vendor, "seedrelay"), { recursive: true });
 copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
-
-// ── vendor the QuickJS realm engine so the shell runs offline ───────────────
-// seedkernel's qjs.wasm, the engine every target runs, which `npm run build` copies
-// into its browser/ dir. The vendored host/engine-web.js fetches it at
-// ../../browser/qjs.wasm, which from vendor/seedkernel/host/ is vendor/browser/.
-{
-  const src = resolve(pkgRoot, "browser", "qjs.wasm");
-  if (!existsSync(src)) {
-    console.error("missing qjs.wasm — in the seedkernel checkout: cd WASM && npm run build");
-    process.exit(2);
-  }
-  mkdirSync(resolve(vendor, "browser"), { recursive: true });
-  copyFileSync(src, resolve(vendor, "browser", "qjs.wasm"));
-}
 
 console.log("vendored seedkernel-wasm -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");

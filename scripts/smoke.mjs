@@ -1,7 +1,7 @@
 // Headless smoke test: does the shell still work on the seedkernel it depends on?
 //
-// Replays the boot path browser/shell.js actually runs — the bootShell
-// assembly + its boot-selected transport + consent-gated app install +
+// Replays the boot path browser/shell.js actually runs — the browser platform and the
+// host's `standUp` assembly + its boot-selected transport + consent-gated app install +
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
 // injected ChannelFactory sinks (the shape RtcNetwork implements), the real chat app
 // round-trips messages through the shell's two ops (browser/app-api.js), a later build of
@@ -18,16 +18,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
-// sodium + the host resolve through seedkernel-wasm; loadCrypto (the Node entry's
-// one crypto seam) readies core libsodium and mixes in ML-DSA-65, exactly what the
-// browser shell's seedkernel-wasm/crypto-browser loadCrypto does. ML-KEM stays
+// The authoring side's crypto: loadCrypto (the Node entry's crypto seam) readies core
+// libsodium with ML-DSA-65 signing, which signs this test's bundles as the offline builders
+// do. The shells themselves run the host blob's crypto, as the page does. ML-KEM stays
 // private to the signed transport bundle.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-// bootShell is the assembly itself (§12.8): platform members defaulted, the selected
-// transport bundle installed at boot, the adapter built from the transport options passed
-// here. The shells' admit is then ONLY the consent gate.
-const { bootShell } = await import("seedkernel-wasm/shell-core");
+// Each shell boots as shell.js boots the page: the page's loader runs seedkernel's host
+// blob on the browser platform, and that host's `standUp` assembles the node (§12.8,
+// §12.9), the selected transport bundle installed at boot and the adapter built from the
+// transport options passed here. The shells' admit is then ONLY the consent gate.
+const { browserHost } = await import("seedkernel-wasm/platform-web");
+const HOST_BLOB = new Uint8Array(readFileSync(fileURLToPath(import.meta.resolve("seedkernel-wasm/host.skb"))));
+const standUp = (cfg) => browserHost({ hostBlob: HOST_BLOB }).standUp(cfg);
 // `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the host:
 // a replacement transport may spell its claim differently, and then THAT spelling is the
 // one the host reaches. The shell runs the shipped one, so this is the id to agree with.
@@ -236,13 +239,13 @@ const CONTACT = new Uint8Array(32).fill(7); // each node's contact secret, which
 const renders = [];
 const onChatInbound = (claim, from, answer) => { if (answer.length > 0) renders.push(new Uint8Array(answer)); };
 
-// The adapter is bootShell's, exactly as shell.js gets it: the factory exists first
+// The adapter is the assembly's, exactly as shell.js gets it: the factory exists first
 // and is passed as `transport.channels`; boot installs the selected transport and registers
 // each factory's accept sink. Contact policy is installation-local transport GUEST config.
 const channelsA = new InjectedChannels();
 const channelsB = new InjectedChannels();
-const { shell: A, transport: netA } = await bootShell({
-  sodium, identity: identityA,
+const { shell: A, transport: netA } = await standUp({
+  dir: "shell-a", identity: identityA,
   transport: { channels: channelsA, config: { contactSecret: toHex(CONTACT) } }, admit,
 });
 // B keeps no handle on its adapter: the assertions below are about what a driver no
@@ -251,8 +254,8 @@ const { shell: A, transport: netA } = await bootShell({
 // What B is told of its relay and its links as they change, which is how the page follows
 // them (shell.js `onStatus`).
 let toldB = null;
-const { shell: B } = await bootShell({
-  sodium, identity: identityB,
+const { shell: B } = await standUp({
+  dir: "shell-b", identity: identityB,
   transport: { channels: channelsB, config: { contactSecret: toHex(CONTACT) }, onStatus: (status) => { toldB = status; } }, admit,
 });
 
