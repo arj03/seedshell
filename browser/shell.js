@@ -283,8 +283,8 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // `relay` op: it registers there, joins the room and links the peers it meets.
 //
 // The realm engine every app's guest runs in — the transport bundle's, the offers
-// app's, and each installed app's — is bootShell's default (safe-js), imported lazily on
-// the first realm.
+// app's, and each installed app's — is bootShell's default (seedkernel's qjs.wasm on
+// WebAssembly), imported lazily on the first realm.
 //
 // The page serves no name of its own: dispatch is a single claim → bundle
 // slot map (seedkernel §12.10), and there is no owner but a signed bundle. `admit` is

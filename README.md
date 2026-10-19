@@ -312,7 +312,7 @@ nick is a peer's own word.
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs every app directory under `assembly/`, or the ones it is named, into `bundle/<app>.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. |
 | `scripts/build-boot-bundles.mjs` | Signs the offers and shell apps' guest-only bundles under the same key, each with its own freshness mark in `<name>-author.version`. |
 | `scripts/author.mjs` | The author key and each app's version count, which both builders sign through: whichever runs first mints the key. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
+| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus the browser libsodium and the QuickJS realm engine. Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips an offer through the offers app, and a page notice and a call signal through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, a cast and a tell through hello, whose guest is the room pipe and nothing else, and puts the radio's bundle where jam stood on one shell, to hear the other's jam. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then hello beside chat, a line from one tab shown in the other, and removed. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Then one tab removes the other as its peer and hangs up, and the other still hears of it. Last the radio, started on a directory the test fills: a tab finds its library, searches it, has titles put in the list and plays one, fetched from the radio, and after a reload gets the room back from the radio alone. When the radio goes, its tracks cannot be played and the room passes over them, and a radio started again on the same directory serves them again. The FLAC files it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `browser/vendor/` when a rebuild isn't taking. |
@@ -851,8 +851,8 @@ build/smoke scripts:
 | `seedkernel-wasm/crypto-browser` | `loadCrypto` — the browser build of the same crypto seam Node's `loadCrypto` provides. |
 | `seedkernel-wasm/libsodium` | The browser libsodium build. |
 
-The import map in `shell.html` also maps `seedkernel-wasm/quickjs`. The shell
-never imports it; the vendored host does, for its QuickJS realms.
+The QuickJS realms need no import-map entry: the vendored host loads its realm engine
+by relative import and fetches seedkernel's `qjs.wasm` from `browser/vendor/browser/`.
 
 The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
 the transport bundle speaks its control wire, registering through its `relay` operation
@@ -921,7 +921,7 @@ living out here.
 - **The shell fails in ways that look like seedkernel bugs after a rebuild.**
   Almost always a stale cache. `npm run serve` passes `-c-1` for this reason: a
   plain `http-server` defaults to `max-age=3600`, so the browser keeps serving an
-  old `vendor/host`. Hard-reload, and if a rebuild still doesn't take,
+  old `vendor/seedkernel/host`. Hard-reload, and if a rebuild still doesn't take,
   `npm run clean && npm run build` starts from nothing.
 - **`npm run vendor` refuses with a staleness error.** seedkernel's `build/` is
   newer than its `build-min/`, which happens when you rerun its `tsc` without
