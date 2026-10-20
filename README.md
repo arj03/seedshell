@@ -342,19 +342,9 @@ publishing anything.
 
 ### Section references in the source
 
-Comments across this repo cite seedkernel sections as bare `§N` (e.g. `§12.4`).
-Seedkernel numbers its sections globally across its doc set, so each number lives in
-exactly one file:
-
-| Sections | File |
-| --- | --- |
-| §1 | [README](https://github.com/arj03/seedkernel/blob/main/README.md) |
-| §2–§5, §16: message model, bundle slots, **the WASM module ABI (§4)**, protocol constants | [PROTOCOL](https://github.com/arj03/seedkernel/blob/main/docs/PROTOCOL.md) |
-| §10–§12: the app host: host services, the guest seam, signed bundles, admission, transport, routing | [RUNTIME](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md) (rationale in [DESIGN](https://github.com/arj03/seedkernel/blob/main/docs/DESIGN.md)) |
-| §13–§14 | [SECURITY](https://github.com/arj03/seedkernel/blob/main/docs/SECURITY.md) |
-
-The channel handshake is in
-[CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md).
+Comments across this repo cite seedkernel sections as bare `§N` (e.g. `§12.4`). Seedkernel
+numbers them globally across its docs, and [its README](https://github.com/arj03/seedkernel/blob/main/README.md#the-rest-of-the-spec)
+says which file holds each.
 
 ## Writing an app
 
@@ -569,11 +559,9 @@ Rooms and peers are named by id in hex, as the context names them.
 
 ### 4. Modules: pure compute, optional
 
-A WASM module exporting `scratch` (a pointer) and `handle(input_len) → output_len`. The
-host stages the guest's input at `scratch`, calls `handle`, and reads the output back
-from the same region. It may export `scratchSize` to ask for a larger region than the
-128 KB default (chat does, for images). A module does no I/O and holds no authority;
-see seedkernel PROTOCOL §4 for the full ABI.
+A pure WASM transform the guest calls by name, with no I/O and no authority. Its ABI is
+seedkernel's ([PROTOCOL §4](https://github.com/arj03/seedkernel/blob/main/docs/PROTOCOL.md#4-the-wasm-module-abi)); chat's module
+asks for a larger scratch region than the default, for images.
 
 ### Building it
 
@@ -833,83 +821,48 @@ refused while the first holds `chat`: remove the first to install it.
 
 ## The seedkernel surface the shell uses
 
-Ten published entry points of `seedkernel-wasm`, across the browser shell, the
-headless Node shell and the build/smoke scripts:
+The shell reaches seedkernel only through published entry points of `seedkernel-wasm`.
+What each one is and does is seedkernel's to document, in its
+[CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md) guide; this is what the shell uses them for:
 
 | Import | Used for |
 | --- | --- |
-| `seedkernel-wasm` | Node `loadCrypto()` in the offline bundle builders, the radio, and the headless smoke test's signing. |
-| `seedkernel-wasm/platform-web` | `browserHost`, the page's loader: it runs the host blob's own script on the browser platform (the blob's realm engine and crypto on WebAssembly, private modules in workers, an in-memory store), which is why the page's CSP allows `'unsafe-eval'`. That trusts no new source of code: the script is served by the page's own origin, and apps and peer input run only inside QuickJS in wasm, never through the page's eval. Its host's `standUp` is the one assembly (§12.8, §12.9) the page and the smoke test boot through: the transport bundle pinned to its own author, the adapter built around the supplied `transport.channels` factory, and the boot loads. The page's `admit` composes the offers and shell pins and the consent gate. Its `Shell.call` is the host's own door into a co-resident guest's `services` claim, which is how the page asks the transport anything. Its `onStatus` option is how the page is told the relay's state, who is linked, and whether directly or through the relay, each time any of it changes: the relay pill, the peer pill, the peer list and what the apps are told follow it. The host's `sodium` is the page's crypto too. |
-| `seedkernel-wasm/host.skb` | The host blob, vendored for the page and read by the smoke test. |
-| `seedkernel-wasm/shell-core` | `bootShell` in the headless Node shell (`node/shell.mjs`). |
-| `seedkernel-wasm/bundle` | `verifyBundle`, the one call that unpacks and checks an offered bundle (`peekBundle`), and `genesisHash`, the hash the consent gate's digest of a whole bundle is built from. The browser only verifies; peer attribution uses its node public key. |
-| `seedkernel-wasm/bundle-author` | `authorBundle`, `guestOpFraming` and `hybridAuthorKeysFromSeed` in the offline `build-app-bundle.mjs` and `build-boot-bundles.mjs` scripts. This entry point is never imported by the browser shell. |
-| `seedkernel-wasm/net-rtc` | `RtcNetwork`, the WebRTC `ChannelFactory`: it holds the transport's peer connections, which the transport negotiates over links made through the relay (§12.7). |
-| `seedkernel-wasm/net-ws` | `WsNetwork`, the WebSocket the transport opens to the relay. |
-| `seedkernel-wasm/socket-seam` | `combineChannels`: both factories behind one driver, passed as `transport.channels`. |
-| `seedkernel-wasm/op-frame` | `writeOp`, the signed apps' own operation framing for local guest invocations, and `OpArgs`, the transport bundle's argument writer, paired with its reader so a host-side call cannot drift from what the guest parses. |
+| `seedkernel-wasm` | `loadCrypto`, in the bundle builders, the radio and the smoke test |
+| `seedkernel-wasm/platform-web` | `browserHost`, the page's node |
+| `seedkernel-wasm/host.skb` | The host blob, vendored beside the page and read by the smoke test |
+| `seedkernel-wasm/shell-core` | `bootShell`, the headless shell's node |
+| `seedkernel-wasm/bundle` | `verifyBundle` on a dropped or offered bundle, and `genesisHash` for the digest a consent names |
+| `seedkernel-wasm/bundle-author` | Signing, in the offline builders only |
+| `seedkernel-wasm/net-ws`, `net-rtc`, `socket-seam` | The page's sockets: a WebSocket to the relay and WebRTC to peers, combined as `transport.channels` |
+| `seedkernel-wasm/op-frame` | `writeOp` and `OpArgs`, for calls into an app's guest and into the transport |
 
-The relay is deliberately not a seedkernel entry point. `seedrelay` is the server;
-the transport bundle speaks its control wire, registering through its `relay` operation
-and redialing a relay that drops, and the shell meets the room with seedrelay's room
-client. The shell owns only the selected URL, room, credentials, and UI.
+What the shell builds on them:
 
-Plus two on the guest side. The chat module defines its one memory-layout
-literal, `PK_LEN = 32`, alongside its layout comments (§4,
-`assembly/chat-app/index.ts`). And guest source spells the
-transport's `send` and `peers` ops and its service name `_net` by hand
-(`assembly/guest-lib/net.js`), since a guest imports nothing; seedkernel's host reads the
-protocol a `send` names as the transport reads it (§12.10), and the smoke test runs the
-guest's ops against the shipped transport.
+- **It drives the shipped transport by its ops**, through `Shell.call` on `_net`: `relay` to
+  register, `contact` for this node's contact secret, `welcome` for its room-mates, `addr`
+  for each peer it links to and `forget` for one it drops. It follows the relay and its
+  links through `onStatus`. The relay is seedrelay, which the shell meets rooms on with
+  seedrelay's own room client.
+- **Its own claims are pinned.** `offer/v1`, `shell/v1` and `call/v1` belong to the offers
+  and shell boot bundles, which `admit` allows only from the author and app the page was
+  built with. Every other bundle goes through the consent gate.
+- **Both directions cross an app's guest.** A peer's frame reaches the page as the app
+  guest's answer, read off its load's `onInbound`; the page's own frames, Offers, what it
+  tells a peer's page and a call's signals leave through the apps it pinned.
+- **Guest source spells `_net` and the transport's `send` and `peers` ops by hand**
+  (`assembly/guest-lib/net.js`), since a guest imports nothing. The smoke test runs them
+  against the shipped transport.
 
-Three properties serve as the summary; the details live in the seedkernel docs:
-
-- **The protocol is a bundle; the sockets are the platform's.** The channel AKE, record
-  layer and request/response layer ship as a signed transport bundle serving the local
-  service name `_net`, embedded in the host blob. The host side, link ids and sockets,
-  is `bootShell`'s channel adapter, built around a WebSocket and the platform's
-  `RtcNetwork`, combined and supplied as `transport.channels`; transport policy and its
-  defaults belong to the signed bundle, as do the address book and contact gate, which
-  live in that bundle's own realm rather than under the adapter. The shell sets the
-  gate, this node's own contact secret, with the transport's local `contact` operation,
-  and names its room-mates with `welcome`, so their calls pass it. It registers on the
-  relay with the `relay` operation, hands the transport each room-mate and contact it
-  calls as a `relay+` address with `addr`, and drops a peer it no longer wants with
-  `forget`. It calls one by telling its page something through the shell app: the
-  transport dials a peer it is sent to, and the answer says whether anyone was there.
-  The transport links to them through the relay and moves each link to WebRTC itself
-  (§12.6, §12.7,
-  [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)).
-- **The offers and shell apps get a pin, the shell's own half of it.** `offer/v1` carries a
-  signed bundle for an app that does not exist yet, so something already
-  installed at boot owns the name and `admit` allows exactly the author and app
-  the page was built with: a pin, not a consent prompt. The shell app, which carries
-  what two pages tell each other and a call's signaling, is pinned the same way. The
-  shell's own consent gate is everything else.
-- **Both directions cross an app's guest.** The host has no send and no receive:
-  an inbound frame reaches the shell as the link occupant's own delivery return,
-  and an outbound frame leaves by an app *calling* `_net`. The render bytes an
-  app's guest returns for an inbound frame are that call's answer, read off
-  the load's own `onInbound` (§12.10), with no second claim and no host-side tap. The
-  page sends nothing through an app's guest: its own frames, an Offer, what it tells a
-  peer's page and a call's signals, leave through the offers and shell apps it pinned.
-  What the page tells the transport goes the same way: the relay to register on, or a
-  peer's address, is a
-  call on `_net` through `Shell.call`, not a field on the adapter, because links
-  are the transport guest's and the adapter knows only sockets. And the transport tells
-  the page its relay's state, who is linked, and whether directly, each time any of it
-  changes (`bootShell`'s `onStatus`), so the page follows its relay and its links without
-  polling them.
-
-The browser JS entry points are declared in exactly two places: the imports at the top of
-`shell.js`, and the inline import map in `shell.html`. The page's CSP allows
-inline scripts (`'unsafe-inline'`) because app UIs run in a sandboxed `blob:`
-iframe that inherits this page's policy. The iframe sandbox is what keeps a view from the
-page, and the policy each view is loaded under (`browser/view-guard.js`) what keeps it
-from the network: the page's own has to let the page reach any relay, so it holds a view
-to nothing. Nothing else in this repo reaches into `node_modules`. If a seedkernel
-change breaks the shell, it broke a public export, which is the point of the shell
-living out here.
+The page's CSP allows `'unsafe-eval'` because `browserHost` evaluates the host blob's script
+(why that loses no security is seedkernel's
+[SECURITY §14](https://github.com/arj03/seedkernel/blob/main/docs/SECURITY.md#14-security-considerations)), and `'unsafe-inline'`
+because app views run in sandboxed `blob:` iframes that inherit the page's policy. The
+sandbox keeps a view from the page, and the policy each view is loaded under
+(`browser/view-guard.js`) keeps it from the network. The browser JS entry points are
+declared in exactly two places, the imports at the top of `shell.js` and the import map in
+`shell.html`, and nothing else in this repo reaches into `node_modules`. So a seedkernel
+change that breaks the shell broke a public export, which is the point of the shell living
+out here.
 
 ## Troubleshooting
 
