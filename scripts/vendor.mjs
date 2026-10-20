@@ -8,15 +8,10 @@
 // of entry points. The minified tree is what seedstore's p2p.html vendors too —
 // same convention across both apps — with the readable `build/` as a fallback.
 //
-// libsodium ships alongside because libsodium-wrappers.mjs resolves both its core
-// module and its .wasm relative to its own URL (`new URL('./libsodium.wasm',
-// import.meta.url)`), so the three files must stay in one directory.
-//
-// The QuickJS realm engine (safe-js) is vendored too: the transport bundle the shell
-// admits runs as a confined guest program, and the realm factory lives in
-// host/safe-js.js, which names seedkernel's in-repo engine and
-// quickjs-emscripten-core as bare specifiers. Same set and layout seedstore's
-// build-browser-demo.mjs stages, so one import map serves both apps.
+// Beside it goes seedkernel's host blob (build/host.skb): the realm engine every guest
+// runs on and the host's crypto, which the page fetches and hands to the browser platform
+// (shell.js). The same blob the Node and native nodes run, so the page carries no crypto
+// or engine of its own.
 
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -99,33 +94,21 @@ mkdirSync(vendor, { recursive: true });
 
 // The whole minified tree: host/ and services/ (host modules import ../services/* by
 // relative path) plus the top-level ws/forwarder entry files, unused by the shell but
-// part of the same tree. libsodium and mldsa65.wasm live in seedkernel's
-// browser/ dir and are copied separately, below.
-cpSync(hostSrc, vendor, { recursive: true });
+// part of the same tree.
+cpSync(hostSrc, resolve(vendor, "seedkernel"), { recursive: true });
 
-for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
-  const src = resolve(pkgRoot, "browser", f);
-  if (!existsSync(src)) {
-    console.error(`missing ${f} — in the seedkernel checkout: cd WASM && npm run build:browser-sodium`);
-    process.exit(2);
-  }
-  cpSync(src, resolve(vendor, f));
-}
-
-// ML-DSA-65 for manifest suite 0x02 (§12.4). The same artifact Node reads and the native
-// binary embeds, so the shell admits exactly the bundles they admit; it fetches the file
-// by URL rather than importing it, so it does not need to sit beside a JS module.
+// The host blob: qjs.wasm, libsodium and ML-DSA-65 (manifest suite 0x02, §12.4), the same
+// bytes the Node and native nodes run, so the shell admits exactly the bundles they admit.
+// ML-KEM-768 is private content of the signed transport bundle; no loose browser artifact
+// is needed for it.
 {
-  const src = resolve(pkgRoot, "browser/mldsa65.wasm");
+  const src = resolve(rawDir, "host.skb");
   if (!existsSync(src)) {
-    console.error("missing mldsa65.wasm — in the seedkernel checkout: cd WASM && npm run build:pq");
+    console.error("missing build/host.skb — in the seedkernel checkout: cd WASM && npm run build");
     process.exit(2);
   }
-  cpSync(src, resolve(vendor, "mldsa65.wasm"));
+  copyFileSync(src, resolve(vendor, "host.skb"));
 }
-
-// ML-KEM-768 is private content of the signed transport bundle now; no loose
-// browser artifact is needed here.
 
 // ── vendor seedrelay's room client ──────────────────────────────────────────
 // Rooms are the app's: the page meets peers in a relay room itself and hands them to the
@@ -138,60 +121,6 @@ if (!existsSync(roomsSrc)) {
 }
 mkdirSync(resolve(vendor, "seedrelay"), { recursive: true });
 copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
-
-// ── vendor the QuickJS realm engine so the shell runs offline ───────────────
-// Two pieces, because that is how seedkernel splits them: the ENGINE is the
-// seedkernel's own in-repo quickjs-ng 0.16.1 build (WASM/quickjs/dist — the same
-// blob its node tests and, at the same pin, the native binary run), and the JS API
-// layer around it is the npm package quickjs-emscripten-core. safe-js.js names
-// both as bare specifiers ("seedkernel-wasm/quickjs" and
-// "quickjs-emscripten-core"), so each lands in its own vendored dir with an
-// import-map entry in shell.html.
-//
-// Within a dir the files find each other: variant.mjs pulls ./ffi.mjs and
-// ./emscripten-module.mjs relatively, and the emscripten glue fetches
-// `new URL("emscripten-module.wasm", import.meta.url)` — so the engine's four
-// files must stay together, the same rule libsodium's three follow above.
-// Nothing here is node-only: the glue is built for `web,node` and picks the
-// browser's fetch path at runtime. Same layout seedstore's
-// build-browser-demo.mjs stages.
-const nodeModules = resolve(pkgRoot, "node_modules");
-
-// The engine, from the seedkernel checkout itself — dist/ is checked in there, so
-// this needs no install, only the sibling checkout the guard above proved.
-{
-  const src = resolve(pkgRoot, "quickjs", "dist");
-  const dstDir = resolve(vendor, "quickjs");
-  mkdirSync(dstDir, { recursive: true });
-  for (const f of ["variant.mjs", "ffi.mjs", "emscripten-module.mjs", "emscripten-module.wasm"]) {
-    if (!existsSync(join(src, f))) {
-      console.error(`missing quickjs/dist/${f} in the seedkernel checkout — see WASM/quickjs/README.md`);
-      process.exit(2);
-    }
-    copyFileSync(join(src, f), join(dstDir, f));
-  }
-}
-
-// The JS API layer. quickjs-emscripten-core is chunked/code-split with hashed
-// names (chunk-*.mjs, module-*.mjs), so copy every .mjs from its dist;
-// @jitl/quickjs-ffi-types, which it imports by name, needs only its entry.
-// [package, dist subdir, dest under vendor/, explicit files, copy EVERY .mjs?]
-const VENDOR = [
-  ["quickjs-emscripten-core", "dist", "quickjs-emscripten-core", ["index.mjs"], true],
-  ["@jitl/quickjs-ffi-types", "dist", "quickjs-ffi-types",       ["index.mjs"], false],
-];
-for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
-  const src = join(nodeModules, ...pkg.split("/"), sub);
-  if (!existsSync(src)) {
-    console.error(`vendor: ${pkg}/${sub} not found — in the seedkernel checkout: cd WASM && npm install`);
-    process.exit(2);
-  }
-  const dstDir = resolve(vendor, dest);
-  mkdirSync(dstDir, { recursive: true });
-  const names = new Set(files);
-  if (allMjs) for (const n of readdirSync(src)) if (n.endsWith(".mjs")) names.add(n);
-  for (const n of names) copyFileSync(join(src, n), join(dstDir, n));
-}
 
 console.log("vendored seedkernel-wasm -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");

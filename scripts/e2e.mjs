@@ -67,7 +67,7 @@ for (const [path, why] of [
   [join(root, "bundle", "jam.skb"), "run `npm run build` first"],
   [join(root, "bundle", "hello.skb"), "run `npm run build` first"],
   [join(root, "bundle", "radio.skb"), "run `npm run build` first"],
-  [join(root, "browser", "vendor", "host"), "run `npm run build` first"],
+  [join(root, "browser", "vendor", "seedkernel", "host"), "run `npm run build` first"],
   [relayPath, "run `npm install` first"],
 ]) {
   if (!existsSync(path)) { console.error(`e2e: ${path} not found — ${why}`); process.exit(2); }

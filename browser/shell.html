@@ -31,11 +31,16 @@
      ABI 6: the host's module table stands each one up in its own worker so a call
      can be killed at its deadline, and the worker script is a blob URL. Without this
      the fallback is script-src, which has no blob:, and every module bind — so every
-     app install — fails at the CSP. -->
+     app install — fails at the CSP.
+
+     'unsafe-eval' is for the host: the page's loader evaluates the host blob's own
+     script (seedkernel's browserHost), as the Node loader does. A view gains nothing by
+     it, since its own policy applies beside this one and has no 'unsafe-eval'; in this
+     document it opens nothing that 'unsafe-inline' does not. -->
 
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
-  script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline';
+  script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
   connect-src 'self' ws: wss:;
   worker-src 'self' blob:;
@@ -282,28 +287,20 @@
 </main>
 
 <!-- The seedkernel surface the shell depends on, declared in one place. `npm run vendor`
-     copies seedkernel-wasm's built host (build-min: host/ + services/) into ./vendor/;
-     the seedkernel-wasm/* specifiers below are the entire contract between this
-     page and the runtime. The QuickJS entries are not the shell's own: they are the realm
-     engine every app's guest runs in, imported by bare specifier from the vendored
-     safe-js that shell-core loads on the first realm (seedkernel's own quickjs-ng
-     build, whose .wasm rides beside its variant, plus quickjs-emscripten-core, the
-     JS API layer over it). Same layout seedstore's build-browser-demo.mjs stages. -->
+     copies seedkernel-wasm's built host (build-min: host/ + services/) into
+     ./vendor/seedkernel/, and seedkernel's host blob (the host script, its realm engine and
+     its crypto) to ./vendor/host.skb, which shell.js fetches and runs; the seedkernel-wasm/*
+     specifiers below are the entire contract between this page and the runtime. -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/shell-core":    "./vendor/host/shell-core.js",
-    "seedkernel-wasm/net-rtc":       "./vendor/services/net-rtc.js",
-    "seedkernel-wasm/net-ws":        "./vendor/services/net-ws.js",
-    "seedkernel-wasm/socket-seam":   "./vendor/services/socket-seam.js",
-    "seedkernel-wasm/bundle":        "./vendor/host/bundle.js",
-    "seedkernel-wasm/op-frame":      "./vendor/services/op-frame.js",
-    "seedrelay/rooms":               "./vendor/seedrelay/rooms.mjs",
-    "seedkernel-wasm/crypto-browser": "./vendor/host/crypto-browser.js",
-    "seedkernel-wasm/libsodium":     "./vendor/libsodium-wrappers.mjs",
-    "seedkernel-wasm/quickjs":       "./vendor/quickjs/variant.mjs",
-    "quickjs-emscripten-core":       "./vendor/quickjs-emscripten-core/index.mjs",
-    "@jitl/quickjs-ffi-types":       "./vendor/quickjs-ffi-types/index.mjs"
+    "seedkernel-wasm/platform-web":  "./vendor/seedkernel/host/platform-web.js",
+    "seedkernel-wasm/net-rtc":       "./vendor/seedkernel/services/net-rtc.js",
+    "seedkernel-wasm/net-ws":        "./vendor/seedkernel/services/net-ws.js",
+    "seedkernel-wasm/socket-seam":   "./vendor/seedkernel/services/socket-seam.js",
+    "seedkernel-wasm/bundle":        "./vendor/seedkernel/host/bundle.js",
+    "seedkernel-wasm/op-frame":      "./vendor/seedkernel/services/op-frame.js",
+    "seedrelay/rooms":               "./vendor/seedrelay/rooms.mjs"
   }
 }
 </script>
