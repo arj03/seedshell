@@ -226,7 +226,7 @@
     font-size: 0.85em;
     color: var(--muted);
   }
-  input[type=text], input[type=password], textarea {
+  input[type=text], input[type=password] {
     width: 100%;
     font-family: var(--mono);
     background: var(--panel-2);
@@ -237,20 +237,12 @@
     font-size: 0.95em;
     min-height: 40px;
   }
-  input[type=text]:focus, input[type=password]:focus, textarea:focus {
+  input[type=text]:focus, input[type=password]:focus {
     outline: none;
     border-color: var(--accent);
     background: #181c22;
   }
-  textarea {
-    min-height: 5.5em;
-    resize: vertical;
-    line-height: 1.35;
-    word-break: break-all;        /* SDP blobs are one long line */
-  }
-
   .row { display: flex; gap: 0.5em; flex-wrap: wrap; align-items: center; }
-  .row.tight { gap: 0.35em; }
   .row > .spacer { flex: 1; }
 
   .hint {
@@ -262,21 +254,8 @@
   .hint kbd  { background: var(--panel-2); padding: 0.05em 0.4em; border-radius: 3px;
                           border: 1px solid var(--line); font-size: 0.9em; }
 
-  .me   { color: var(--me); }
-  .peer { color: var(--peer); }
   .sys  { color: var(--muted); }
   .err  { color: var(--err); }
-
-  .notice {
-    color: var(--warn);
-    background: #2a2410;
-    border: 1px solid #4a3d1d;
-    border-left: 3px solid var(--warn);
-    padding: 0.55em 0.8em;
-    border-radius: 4px;
-    font-size: 0.85em;
-  }
-  .notice strong { color: #ffd9a0; }
 
   /* ── invite/accept stepper ────────────────────────────────────────── */
   .lead-hint {
@@ -328,28 +307,6 @@
     line-height: 1.3;
   }
   .step-body { display: flex; flex-direction: column; gap: 0.5em; }
-
-  /* readonly "output" container — visually distinct from input textareas.
-     Dashed border + dimmer background = "nothing here yet". When a value lands,
-     .ready is toggled and the border becomes a solid green hint. */
-  .output {
-    border: 1px dashed var(--line-2);
-    border-radius: 6px;
-    background: #101218;
-  }
-  .output textarea {
-    background: transparent;
-    border: none;
-    color: var(--text);
-    width: 100%;
-    padding: 0.55em 0.7em;
-    min-height: 4.5em;
-    font-size: 0.85em;
-    word-break: break-all;
-    resize: vertical;
-  }
-  .output textarea:focus { outline: none; background: transparent; }
-  .output.ready { border-style: solid; border-color: #2d4d3a; background: #121a16; }
 
   .hint.subtle { font-size: 0.78em; }
 
@@ -508,8 +465,7 @@
     .pill { font-size: 0.72em; padding: 0.18em 0.45em; }
     .tabs button { padding: 0.7em 0.85em; font-size: 0.88em; }
     .panel { padding: 0.7em; gap: 0.6em; }
-    textarea { font-size: 16px; }      /* iOS: prevent zoom-on-focus */
-    input[type=text] { font-size: 16px; }
+    input[type=text] { font-size: 16px; }   /* iOS: prevent zoom-on-focus */
     .app-toolbar, #call-bar, #video-tiles { padding: 0.4em 0.55em; }
     #shell-log { max-height: 10em; }
   }
@@ -524,12 +480,6 @@
     }
   }
 
-  .field-inline {
-    flex-direction: row;
-    align-items: center;
-    gap: 0.4em;
-  }
-  .field-label-sm { font-size: 0.8em; }
   .relay-status   { font-size: 0.82em; }
 
   /* ── network panel: the room's peers ──────────────────────────────── */

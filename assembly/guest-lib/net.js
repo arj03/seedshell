@@ -1,8 +1,9 @@
-// What any guest that reaches the network writes the same way: the two ops the transport
-// answers to an app (`send` and `peers`), and keys as hex. The offline builders
-// (scripts/build-app-bundle.mjs, scripts/build-boot-bundles.mjs) put it in front of each
-// guest that names it, after seedkernel's op-frame, which gives `callerOf`, `readOp` and
-// `writeOp`. It is guest SOURCE, signed into each bundle, not a module anything imports,
+// What any guest that reaches the network writes the same way: the transport's `send`, and
+// keys as hex. Who is linked a guest reads off the node's context (context.js), which the
+// shell tells it each time that changes. The offline builder
+// (scripts/build-app-bundle.mjs) puts it in front of each guest that names it, after
+// seedkernel's op-frame, which gives `callerOf`, `readOp`, `writeOp`, `utf8Encode` and
+// `utf8Decode`. It is guest SOURCE, signed into each bundle, not a module anything imports,
 // so the transport's argument layout is written once and every bundle still carries it.
 
 /** The local service name the transport serves (browser/app-api.js `NET_PROTO`). */
@@ -43,13 +44,4 @@ function netSend(to, proto, payload, reply = false) {
   u32(proto.length); for (let i = 0; i < proto.length; i++) args[o++] = proto.charCodeAt(i);
   u32(payload.length); args.set(payload, o);
   return host.call(NET, writeOp("send", args));
-}
-
-/** The peers this node holds an authenticated link to, each as key hex. Asked of the
- *  transport every time, because links are its own: a guest keeps no copy to fall behind. */
-async function netPeers() {
-  const bytes = await host.call(NET, writeOp("peers", new Uint8Array(0)));
-  const out = [];
-  for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(toHex(bytes.subarray(off, off + 32)));
-  return out;
 }

@@ -2,7 +2,7 @@
 // serve the shell with no bundler. The import map in shell.html points at these
 // files; nothing else in this repo reaches into node_modules.
 //
-// This is deliberately a dumb copy of `build-min` wholesale: shell-core.js and
+// This is deliberately a dumb copy of `build-min` wholesale: platform.js and
 // bundle.js import their siblings and the `services/` tree by relative path, so the
 // whole tree has to arrive intact even though the shell itself names only a handful
 // of entry points. The minified tree is what seedstore's p2p.html vendors too —
@@ -10,8 +10,8 @@
 //
 // Beside it goes seedkernel's host blob (build/host.skb): the realm engine every guest
 // runs on and the host's crypto, which the page fetches and hands to the browser platform
-// (shell.js). The same blob the Node and native nodes run, so the page carries no crypto
-// or engine of its own.
+// (host-blob.js, shell.js). The same blob the Node and native nodes run, so the page
+// carries no crypto or engine of its own.
 
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -125,5 +125,5 @@ copyFileSync(roomsSrc, resolve(vendor, "seedrelay", "rooms.mjs"));
 console.log("vendored seedkernel-wasm -> browser/vendor/");
 console.log("serve it:   npm run serve        (re-vendors + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
-console.log("     the browser keep a STALE vendor/host after a rebuild → confusing errors.");
+console.log("     the browser keep a STALE vendor/seedkernel after a rebuild → confusing errors.");
 console.log("  relay + shell:  npm run relay  →  http://localhost:3000/shell.html");

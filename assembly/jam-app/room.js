@@ -60,6 +60,8 @@ const DOC = 1, WANT = 2, NACK = 3, BLOCK = 4, FIND = 5, FOUND = 6, PICK = 7, MIS
 
 /** The largest file taken. */
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
+/** How many of a file's pieces are read and named at once. */
+const NAMING = 8;
 /** A peer that has not answered `hello` is asked again after this long, and this many times. */
 const HELLO_RETRY_MS = 3000;
 const HELLO_TRIES = 20;
@@ -93,6 +95,9 @@ const listOf = (v, max) => (Array.isArray(v) ? v.slice(0, max) : []);
 /** Whether the change (v, by) is later than (v0, by0): the clock, then the key. */
 const later = (v, by, v0, by0) => v > v0 || (v === v0 && by > by0);
 
+/** What a file at `path` is called: its name, less its extension. */
+const leafOf = (path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "") || path;
+
 function fmtSize(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 }
@@ -108,11 +113,10 @@ const tellDoc = (room, to, doc) => tellJson(room, to, DOC, doc);
 const hashOf = (bytes) => app.call([ASK_HASH], bytes).then(toHex);
 
 // ── who, and where ──────────────────────────────────────────────────────
-// All of it the shell's, heard in the context: this node's key and nick, each peer's nick,
-// who is linked, and the rooms this node is in.
+// All of it the shell's, heard in the context: this node's key and nick, who is linked, and
+// the rooms this node is in. What each peer is called is the door's (`app.nameOf`).
 let me = "";
 let myNick = "";
-let nicks = new Map();
 let linked = new Set();
 /** The rooms this node is in, by id in hex. */
 const rooms = new Map();
@@ -389,11 +393,8 @@ function greet(room) {
   }
 }
 
-/** Let go of a track's audio: each block no track still in a list names. Answers them. */
-function forgetTrack(t, room) {
-  t.whole = false;
-  room?.holders.delete(t.id);
-  if (!t.blocks) return [];
+/** Every block a track still in a list names, in any room here, but `t`'s. */
+function keptBlocks(t) {
   const kept = new Set();
   for (const r of rooms.values()) {
     for (const other of r.tracks.values()) {
@@ -402,18 +403,28 @@ function forgetTrack(t, room) {
       for (const b of other.blocks) kept.add(b);
     }
   }
+  return kept;
+}
+
+/** Let go of a track's audio: each block no track still in a list names. Answers them. */
+function forgetTrack(t, room) {
+  t.whole = false;
+  room.holders.delete(t.id);
+  if (!t.blocks) return [];
+  const kept = keptBlocks(t);
   const freed = [t.head, ...t.blocks].filter((b) => !kept.has(b));
   for (const b of freed) {
     store.delete(b);
-    room?.blocks.delete(b);
     for (const r of rooms.values()) r.blocks.delete(b);
   }
   return freed;
 }
 
+/** Leave a room, letting go of the audio no room still here names, all of it at once. */
 function leaveRoom(room) {
   rooms.delete(room.id);
-  for (const t of room.tracks.values()) forgetTrack(t, room);
+  const kept = keptBlocks(null);
+  for (const b of room.blocks) if (!kept.has(b)) store.delete(b);
 }
 
 // ── this node's own changes ─────────────────────────────────────────────
@@ -464,12 +475,19 @@ async function cutFile(file, { progress = () => {}, proves = async () => {} } = 
   if (ix.cuts.length > MAX.blocks) throw new Error("it is too long");
   await proves(ix);
   const head = { id: await hashOf(ix.head), part: new Blob([ix.head]) };
-  const pieces = [];
-  for (const cut of ix.cuts) {
-    const part = file.slice(cut.start, cut.end);
-    pieces.push({ id: await hashOf(new Uint8Array(await part.arrayBuffer())), part });
-    progress(0.5 + pieces.length / ix.cuts.length / 2);
-  }
+  // Several pieces at once, each read and named in its own place, so one waits on no other's
+  // round trip to the guest.
+  const pieces = new Array(ix.cuts.length);
+  let next = 0, done = 0;
+  const nameNext = async () => {
+    while (next < ix.cuts.length) {
+      const i = next++;
+      const part = file.slice(ix.cuts[i].start, ix.cuts[i].end);
+      pieces[i] = { id: await hashOf(new Uint8Array(await part.arrayBuffer())), part };
+      progress(0.5 + ++done / ix.cuts.length / 2);
+    }
+  };
+  await Promise.all(Array.from({ length: NAMING }, nameNext));
   return { ix, head, pieces };
 }
 
@@ -498,16 +516,17 @@ async function addTrack(room, id, file, name, how) {
 }
 
 // ── audio across: blocks ────────────────────────────────────────────────
-/** Send a member the blocks it asked for, of the ones a track in this room lists. */
+/** Send a member the blocks it asked for, of the ones a track in this room lists: all read
+ *  at once, and sent in the order asked. */
 async function serve(room, from, ids) {
-  const lacking = [];
-  for (const id of ids.slice(0, 16)) {
+  const asked = ids.slice(0, 16);
+  const read = await Promise.all(asked.map(async (id) => {
     const blob = room.blocks.has(id) ? store.get(id) : undefined;
-    try {
-      if (!blob) throw new Error("not held");
-      app.tell(room.id, from, [BLOCK], new Uint8Array(await blob.arrayBuffer()));
-    } catch { lacking.push(id); }   // not held, or its file can no longer be read
-  }
+    try { return blob ? new Uint8Array(await blob.arrayBuffer()) : null; }
+    catch { return null; }   // its file can no longer be read
+  }));
+  const lacking = asked.filter((id, i) => !read[i]);
+  for (const bytes of read) if (bytes) app.tell(room.id, from, [BLOCK], bytes);
   if (lacking.length > 0) app.tell(room.id, from, [NACK], fromHex(lacking.join("")));
 }
 
@@ -518,7 +537,6 @@ async function serve(room, from, ids) {
 function memberContext(ctx) {
   me = ctx.me;
   myNick = ctx.nick;
-  nicks = new Map(Object.entries(ctx.nicks));
   linked = new Set(ctx.linked);
   const ids = new Set(ctx.rooms.map((r) => r.id));
   const left = [...rooms.values()].filter((room) => !ids.has(room.id));

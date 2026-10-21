@@ -27,9 +27,11 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { dirname, join, extname } from "node:path";
+import { dirname, join, extname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -134,9 +136,13 @@ browser.stdio[3].on("error", () => {});
 procs.push(browser);
 
 async function cleanup() {
+  // Each process is let go of once it has exited, so its files can be removed, or after a
+  // while if it will not.
+  const exited = (p) => p.exitCode !== null || p.signalCode !== null ? Promise.resolve()
+    : Promise.race([new Promise((done) => p.once("exit", done)), sleep(2000)]);
   for (const p of procs) { try { p.kill(); } catch {} }
   server.close();
-  await sleep(500);
+  await Promise.all(procs.map(exited));
   for (const dir of [profile, saved, music, radioHome]) {
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch {}
   }
@@ -210,34 +216,25 @@ async function openTab(name) {
 /** Evaluate in the shell's own page. */
 const page = (tab, expression) => evaluate(tab.sid, expression);
 
-/** Evaluate in the tab's app view, the sandboxed iframe of its one installed app. The view
+/** Evaluate in one of the tab's app views, the sandboxed iframes of its installed apps: the
+ *  one whose page has this title, or with null the last one, for a tab with one app. A view
  *  is another origin, so the page cannot be asked: the frame is reached as its own target
  *  when the browser gave it a process, and otherwise through an isolated world in it, which
  *  shares its DOM, so a click or a form submit there reaches the app's own listeners. */
-async function view(tab, expression) {
-  const own = frames.get(tab.sid) ?? [];
-  if (own.length > 0) return evaluate(own[own.length - 1], expression);
-  const kids = (await send("Page.getFrameTree", {}, tab.sid)).frameTree.childFrames ?? [];
-  if (kids.length === 0) throw new Error("no app view");
-  const { executionContextId } = await send("Page.createIsolatedWorld",
-    { frameId: kids[kids.length - 1].frame.id, worldName: "e2e" }, tab.sid);
-  return evaluate(tab.sid, expression, executionContextId);
-}
-
-/** Evaluate in one of the tab's app views, the one whose page has this title: for a tab
- *  with two apps installed. Reached the way `view` reaches the only one. */
 async function viewTitled(tab, title, expression) {
-  const isIt = `document.title === ${JSON.stringify(title)}`;
-  for (const sid of frames.get(tab.sid) ?? []) {
+  const isIt = title === null ? "true" : `document.title === ${JSON.stringify(title)}`;
+  for (const sid of [...(frames.get(tab.sid) ?? [])].reverse()) {
     if (await evaluate(sid, isIt).catch(() => false)) return evaluate(sid, expression);
   }
   const kids = (await send("Page.getFrameTree", {}, tab.sid)).frameTree.childFrames ?? [];
-  for (const kid of kids) {
+  for (const kid of kids.reverse()) {
     const { executionContextId } = await send("Page.createIsolatedWorld", { frameId: kid.frame.id, worldName: "e2e" }, tab.sid);
     if (await evaluate(tab.sid, isIt, executionContextId)) return evaluate(tab.sid, expression, executionContextId);
   }
-  throw new Error(`no ${title} view`);
+  throw new Error(title === null ? "no app view" : `no ${title} view`);
 }
+/** Evaluate in the tab's one app view. */
+const view = (tab, expression) => viewTitled(tab, null, expression);
 
 // ── the steps ─────────────────────────────────────────────────────────────────
 
@@ -260,11 +257,12 @@ const click = (id) => `document.getElementById(${JSON.stringify(id)}).click()`;
 const clickButton = (list, label) =>
   `[...document.querySelectorAll('#${list} button')].find((b) => b.textContent === ${JSON.stringify(label)}).click()`;
 
-/** Pick a bundle in the Apps tab's file field, which is what dropping it does. */
+/** Pick a bundle in the Apps tab's file field, which is what dropping it does: one of
+ *  bundle/'s by its name, or any file by its path. */
 async function drop(tab, file) {
   const { root: doc } = await send("DOM.getDocument", {}, tab.sid);
   const { nodeId } = await send("DOM.querySelector", { nodeId: doc.nodeId, selector: "#app-file" }, tab.sid);
-  await send("DOM.setFileInputFiles", { files: [join(root, "bundle", file)], nodeId }, tab.sid);
+  await send("DOM.setFileInputFiles", { files: [isAbsolute(file) ? file : join(root, "bundle", file)], nodeId }, tab.sid);
 }
 const appShown = (tab) => page(tab, text("app-status"));
 const frameCount = (tab) => page(tab, "document.querySelectorAll('iframe.app-frame').length");
@@ -548,9 +546,11 @@ try {
   await waitFor("A: B is a contact, as the view asked", async () => (await contactsOf(A)).includes(keyB));
   await waitFor("B: and lists A as its peer too", async () => (await contactsOf(B)).includes(keyA));
 
-  // 10. a bundle that is not an app for this shell (a boot bundle has no `shell` entry) is
-  //     refused, saying why, and changes nothing
-  await drop(A, "offers.skb");
+  // 10. a bundle that is not an app for this shell (the transport's has no `shell` entry)
+  //     is refused, saying why, and changes nothing
+  const notAnApp = join(profile, "transport.skb");
+  writeFileSync(notAnApp, transportBundleBytes());
+  await drop(A, notAnApp);
   await waitFor("A: a bundle that is not an app is refused, saying why", async () => /not an app for this shell/.test(await page(A, text("apps-notice"))));
   check((await appShown(A)) === "Chat v2", "A: the refused bundle changed nothing");
   await page(A, click("tab-app"));

@@ -1,6 +1,5 @@
 // The author every bundle here is signed by, and how far each app's version has counted.
-// scripts/build-app-bundle.mjs and scripts/build-boot-bundles.mjs both sign through this
-// file, so whichever runs first mints the key.
+// scripts/build-app-bundle.mjs signs through this file, and its first run mints the key.
 //
 // An author is a key set, not a program: one signs every app and every version of each, and
 // a deployment's policy would list its public key as an allowed author. An app's version is

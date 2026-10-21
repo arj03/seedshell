@@ -84,10 +84,9 @@ const picker = $("picker"), toasts = $("toasts");
 /** The room open, of the ones this node is in (`rooms`, room.js). */
 let active = null;
 
-/** The blocks asked of a peer and not yet here: id → { room, t, peer, at }. `asked` is
- *  every id ever asked for, so one that arrives late is still kept. */
+/** The blocks asked of a peer and not yet here: id → { room, t, peer, at }. One that
+ *  arrives after it stopped being waited for is still kept, if a room here lists it. */
 const pending = new Map();
-const asked = new Set();
 /** Peers not to ask for a while, by key: a time on `performance.now()`. */
 const strikes = new Map();
 /** How fast blocks have been arriving, in this run of asking: the bytes that came and the
@@ -104,9 +103,7 @@ const saving = new Set();
 let listening = false;
 
 const short = (id) => id.slice(0, 8);
-function nameOf(id) {
-  return (id === me ? myNick : nicks.get(id)) || short(id);
-}
+const nameOf = app.nameOf;
 const hueOf = (id) => parseInt(id.slice(0, 4), 16) % 360;
 function fmtTime(s) {
   s = Math.max(0, Math.floor(s));
@@ -281,7 +278,7 @@ function addFiles(room, files) {
  *  allows, once this browser has shown it plays a piece cut that way, and left on disk. */
 async function addFile(room, file, up) {
   try {
-    await addTrack(room, randomHex(8), file, file.name.replace(/\.[^.]+$/, "") || file.name, {
+    await addTrack(room, randomHex(8), file, leafOf(file.name), {
       progress: (done) => { up.done = done; drawStates(); },
       proves: (ix) => proves(ix, file),
     });
@@ -350,16 +347,16 @@ function pump() {
     if (peers.length === 0) continue;
     const peer = peers[turn++ % peers.length];
     pending.set(id, { room, t, peer, at: now });
-    asked.add(id);
     asks.set(peer, [...(asks.get(peer) ?? []), id]);
     free--;
   }
   for (const [peer, ids] of asks) app.tell(room.id, peer, [WANT], fromHex(ids.join("")));
 }
 
-/** A block a peer sent, named by our own guest. Kept if it is one this node asked for. */
+/** A block a peer sent, named by our own guest. Kept if a track in a room here lists it,
+ *  which is every block this node asks for. */
 function onBlock(from, id, bytes) {
-  if (!asked.has(id) || store.has(id)) return;
+  if (store.has(id) || ![...rooms.values()].some((room) => room.blocks.has(id))) return;
   const w = pending.get(id);
   pending.delete(id);
   store.set(id, new Blob([bytes]));
@@ -710,31 +707,37 @@ function refresh(room, changed, from) {
   for (const key of changed.msgs) drawMessage(room, room.msgs.get(key));
   for (const id of changed.added) drawAdded(room, room.tracks.get(id));
   for (const target of changed.reacts) {
-    if (target.startsWith("t:")) { changed.list = true; continue; }
-    room.els.get(target)?.querySelector(".chips")?.replaceWith(chips(room, target));
+    if (!target.startsWith("t:")) room.els.get(target)?.querySelector(".chips")?.replaceWith(chips(room, target));
+    else if (room === active) drawChips(rows.find((row) => row.t.id === target.slice(2)));
   }
   if (from && changed.msgs.length > 0 && room === active && main.dataset.tab !== "chat") {
     tabs.querySelector('[data-tab="chat"]').classList.add("dot");
   }
   if (room !== active) return;
   emptyNote.hidden = room.log.childElementCount > 0;
-  if (changed.list || changed.play) {
-    drawSoon();
-    syncAudio();
-    pump();
+  if (!changed.list && !changed.play) return;
+  syncAudio();
+  pump();
+  // Drawn once the sound is where the room is. Which track is on is drawn into the rows that
+  // are there; the list is built again only when what is in it changed.
+  if (changed.list) drawSoon();
+  else {
+    drawStates();
+    drawPlayer();
   }
 }
 
-/** The list's rows as drawn, each { t, li, play, sub, fill }, and each file being read in with
- *  its row's line of text. Kept so that what only moves, how much of a track is here, is
- *  written into the rows that are there: a list rebuilt under a click loses the click. */
+/** The list's rows as drawn, each { t, li, play, sub, fill, chips, shown }, `shown` what was
+ *  last written into it, and each file being read in with its row's line of text. Kept so
+ *  that what only moves, how much of a track is here and which is on, is written into the
+ *  rows that are there: a list rebuilt under a click loses the click. */
 let rows = [];
 
-/** Why a track is not ready to play here, or nothing if it is. */
-function trackState(room, t) {
+/** Why a track is not ready to play here, or nothing if it is. `held` is how many of its
+ *  pieces are here. */
+function trackState(room, t, held) {
   if (whole(t)) return "";
   if (!available(room, t)) return "nobody here has it";
-  const held = t.blocks.filter((b) => store.has(b)).length;
   const part = `${Math.floor((100 * held) / t.blocks.length)}%`;
   if (!saving.has(t) && (held > 0 || t.blocks.some((b) => pending.has(b)))) return part;
   return saving.has(t) ? `downloading… ${part}` : "";
@@ -752,11 +755,9 @@ function drawList() {
   }
   order.forEach((t, i) => {
     const li = document.createElement("li");
-    const current = room.play.id === t.id;
-    li.className = `track${current ? " current" : ""}${current && room.play.on ? " playing" : ""}`;
+    li.className = "track";
     li.dataset.id = t.id;
-    const startBtn = button("start icon ghost", `Play ${t.title}`, current && room.play.on ? '<span class="eq"><i></i><i></i><i></i><i></i></span>' : ICON.play,
-      () => start(room, t.id));
+    const startBtn = button("start icon ghost", `Play ${t.title}`, "", () => start(room, t.id));
     const mainEl = document.createElement("div");
     mainEl.className = "t-main";
     const title = document.createElement("div");
@@ -764,7 +765,8 @@ function drawList() {
     title.textContent = t.title;
     const sub = document.createElement("div");
     sub.className = "t-sub";
-    mainEl.append(title, sub, chips(room, `t:${t.id}`));
+    const reacts = chips(room, `t:${t.id}`);
+    mainEl.append(title, sub, reacts);
     const acts = document.createElement("div");
     acts.className = "t-acts";
     const reactBtn = button("icon ghost", "React", ICON.react, () => openPicker(reactBtn, (emoji) => react(room, `t:${t.id}`, emoji)));
@@ -778,7 +780,7 @@ function drawList() {
     fill.className = "t-fill";
     li.append(startBtn, mainEl, acts, fill);
     listEl.appendChild(li);
-    rows.push({ t, li, play: startBtn, sub, fill });
+    rows.push({ t, li, play: startBtn, sub, fill, chips: reacts, shown: "" });
   });
   // What is on its way into the list: a file being read in, and a title a library was
   // asked for.
@@ -809,21 +811,39 @@ function drawList() {
   drawStates();
 }
 
-/** Write into the rows what moves while audio does: how much of each track is here, and how
- *  far each file has been read. */
+/** Write into the rows what moves while audio does: which track is on, how much of each is
+ *  here, and how far each file has been read. A row is written only if what it shows changed. */
 function drawStates() {
   const room = active;
   if (!room) return;
-  for (const { t, li, play, sub, fill } of rows) {
-    const state = trackState(room, t);
+  for (const row of rows) {
+    const { t, li, play, sub, fill } = row;
+    const held = t.blocks.reduce((n, b) => n + (store.has(b) ? 1 : 0), 0);
+    const state = trackState(room, t, held);
+    const current = room.play.id === t.id, playing = current && room.play.on;
+    const text = [fmtTime(t.dur), nameOf(t.by), fmtSize(t.size), state].filter(Boolean).join(" · ");
+    const shown = `${current} ${playing} ${held} ${text}`;
+    if (shown === row.shown) continue;
+    row.shown = shown;
+    li.classList.toggle("current", current);
+    li.classList.toggle("playing", playing);
+    play.innerHTML = playing ? '<span class="eq"><i></i><i></i><i></i><i></i></span>' : ICON.play;
     // A track nobody here has is not started, and the room passes over it (`moveOn`).
     play.disabled = state === "nobody here has it";
     li.classList.toggle("away", play.disabled);
-    sub.textContent = [fmtTime(t.dur), nameOf(t.by), fmtSize(t.size), state].filter(Boolean).join(" · ");
+    sub.textContent = text;
     fill.hidden = whole(t);
-    fill.style.width = `${(100 * t.blocks.filter((b) => store.has(b)).length) / t.blocks.length}%`;
+    fill.style.width = `${(100 * held) / t.blocks.length}%`;
   }
   for (const up of uploads) if (up.sub) up.sub.textContent = `reading… ${Math.floor(up.done * 100)}%`;
+}
+
+/** Draw the reactions on a row's track again. */
+function drawChips(row) {
+  if (!row) return;
+  const now = chips(active, `t:${row.t.id}`);
+  row.chips.replaceWith(now);
+  row.chips = now;
 }
 
 function drawPlayer() {
@@ -958,9 +978,7 @@ let typing = null;
 function librariesOf(room) {
   return [...room.libraries.keys()].filter((id) => room.peers.has(id)).sort();
 }
-/** A title as a list shows it: its file's name without what kind of file it is, and the
- *  folders it is in. */
-const leafOf = (path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "") || path;
+/** The folders a title is in, as a list shows them beside its name (`leafOf`, room.js). */
 const folderOf = (path) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
 
 /** Ask the open library for the titles that match what was typed, from the `from`th on. */
@@ -1027,15 +1045,21 @@ function onMiss(room, from, miss) {
 }
 
 /** The context changed. A library whose member is gone is closed, and what was picked from
- *  it is not coming. */
+ *  it is not coming. Answers whether either happened. */
 function libraryLeft() {
   const there = (room, peer) => rooms.get(room.id) === room && room.peers.has(peer);
+  let left = false;
   for (const [id, p] of picks) {
     if (there(p.room, p.peer)) continue;
     picks.delete(id);
+    left = true;
     toast(`${leafOf(p.path)} was not added: its library has left.`);
   }
-  if (shelf && !(there(shelf.room, shelf.peer) && shelf.room.libraries.has(shelf.peer))) shelf = null;
+  if (shelf && !(there(shelf.room, shelf.peer) && shelf.room.libraries.has(shelf.peer))) {
+    shelf = null;
+    left = true;
+  }
+  return left;
 }
 
 /** A line of a library's list that is not a title: what it says, or a button. */
@@ -1046,23 +1070,11 @@ function libraryLine(cls, ...what) {
   libList.appendChild(li);
 }
 
+/** Draw the open library: what is around its titles (`drawLibraryHead`), and the titles. */
 function drawLibrary() {
-  libraryEl.hidden = !shelf;
-  listEl.hidden = !!shelf;
-  listTitle.textContent = shelf ? "Library" : "Playlist";
+  drawLibraryHead();
   if (!shelf) return;
   const { room, peer, q, titles, total } = shelf;
-  // Whose it is, to choose between where more than one member has a library.
-  const whose = librariesOf(room);
-  if (document.activeElement !== libWho) {
-    libWho.replaceChildren();
-    for (const id of whose) libWho.add(new Option(nameOf(id), id, false, id === peer));
-  }
-  libWho.hidden = whose.length < 2;
-  const holds = room.libraries.get(peer);
-  libQuery.placeholder = `Search ${nameOf(peer)}'s ${holds} title${holds === 1 ? "" : "s"}`;
-  listCount.textContent = total === null ? "" : q === "" ? `${total} title${total === 1 ? "" : "s"}` : `${total} match${total === 1 ? "" : "es"}`;
-
   libList.replaceChildren();
   const coming = new Set([...picks.values()].filter((p) => p.room === room && p.peer === peer).map((p) => p.path));
   for (const title of titles) {
@@ -1094,6 +1106,26 @@ function drawLibrary() {
     more.textContent = "More";
     libraryLine("more", more);
   }
+}
+
+/** Draw what is around a library's titles, and which of the list and the library is shown:
+ *  what changes with the context, without the titles, which do not. */
+function drawLibraryHead() {
+  libraryEl.hidden = !shelf;
+  listEl.hidden = !!shelf;
+  listTitle.textContent = shelf ? "Library" : "Playlist";
+  if (!shelf) return;
+  const { room, peer, q, total } = shelf;
+  // Whose it is, to choose between where more than one member has a library.
+  const whose = librariesOf(room);
+  if (document.activeElement !== libWho) {
+    libWho.replaceChildren();
+    for (const id of whose) libWho.add(new Option(nameOf(id), id, false, id === peer));
+  }
+  libWho.hidden = whose.length < 2;
+  const holds = room.libraries.get(peer);
+  libQuery.placeholder = `Search ${nameOf(peer)}'s ${holds} title${holds === 1 ? "" : "s"}`;
+  listCount.textContent = total === null ? "" : q === "" ? `${total} title${total === 1 ? "" : "s"}` : `${total} match${total === 1 ? "" : "es"}`;
 }
 
 // ── the emoji picker ────────────────────────────────────────────────────
@@ -1170,9 +1202,18 @@ function onContext(ctx) {
     for (const [id, w] of pending) if (w.room === room) pending.delete(id);
     room.log.remove();
   }
-  libraryLeft();
-  if (!active || !rooms.has(active.id)) openRoom([...rooms.values()].sort((a, b) => a.name.localeCompare(b.name))[0] ?? null);
-  else { drawHeader(); drawSoon(); pump(); }
+  const libraryGone = libraryLeft();
+  if (!active || !rooms.has(active.id)) { openRoom([...rooms.values()].sort((a, b) => a.name.localeCompare(b.name))[0] ?? null); return; }
+  // Who is here, and what each is called, is written into what is drawn. The list and a
+  // library's titles are built again only if something picked from one is not coming.
+  drawHeader();
+  if (libraryGone) drawSoon();
+  else {
+    drawStates();
+    drawLibraryHead();
+    drawPlayer();
+  }
+  pump();
 }
 
 /** A peer's frame, from a member of the room it names: [type u8][body]. What every member
@@ -1229,8 +1270,8 @@ listenBtn.addEventListener("click", () => {
     listening = false;
     void audioCtx.suspend();
   } else tuneIn();
-  drawSoon();
   syncAudio();
+  drawPlayer();
   pump();
 });
 volume.addEventListener("input", () => { if (gain) gain.gain.value = Number(volume.value); });
@@ -1292,22 +1333,27 @@ window.addEventListener("drop", (e) => {
 });
 
 // What only time changes: a block that never came, a peer that never answered, a track
-// that ran out, sound that drifted from the room, and the progress bar.
+// that ran out, sound that drifted from the room, and the progress bar. What is drawn is
+// drawn by the clock only while the clock moves it: a wait that ran out, a member still
+// being asked what it holds, and the room playing.
 setInterval(() => {
   const now = performance.now();
+  let lapsed = false;
   for (const [id, w] of pending) {
     if (now - w.at < WANT_TIMEOUT_MS) continue;
     pending.delete(id);
     strikes.set(w.peer, now + STRIKE_MS);
+    lapsed = true;
   }
+  const asking = !!active && [...active.peers.values()].some((peer) => !peer.synced && peer.tries < HELLO_TRIES);
   for (const room of rooms.values()) {
     greet(room);
     moveOn(room);
   }
   pump();
   syncAudio();
-  drawStates();
-  drawPlayer();
+  if (lapsed || asking) drawStates();
+  if (asking || active?.play.on) drawPlayer();
 }, 250);
 
 drawHeader();

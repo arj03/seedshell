@@ -1,0 +1,9 @@
+{
+  "app": "shell",
+  "api": 3,
+  "name": "Shell",
+  "description": "how one page talks to another: what each says of itself, a call's signals, and offers",
+  "protocols": ["shell/v1", "call/v1", "offer/v1"],
+  "guest": ["../guest-lib/net.js", "guest.js"],
+  "boot": true
+}

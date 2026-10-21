@@ -1,6 +1,6 @@
 {
   "app": "jam",
-  "api": 2,
+  "api": 3,
   "name": "Jam",
   "version": "v1",
   "description": "chat, emoji reactions and a playlist a room keeps and plays together",

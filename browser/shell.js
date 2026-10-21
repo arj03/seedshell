@@ -3,14 +3,17 @@
 // this file can only reach what seedkernel has deliberately made public — the
 // import map in shell.html resolves them to the vendored build. If a future
 // seedkernel change breaks the shell, it broke a public export, which is the point.
-// The page's loader: it runs the host blob's own script on the browser platform, the host
-// seedkernel's Node and native nodes run (§12.9), and the node is assembled by that host's
-// `standUp`: the transport bundle pinned to its own author, the channel adapter built from
-// the `transport` options passed to it. The page's admit is then ONLY its consent gate —
-// who may be the network is the assembly's, so nobody can lose it by forgetting it.
-import { browserHost } from "seedkernel-wasm/platform-web";
+// The page imports the host (§12.9) and runs it on the browser platform, which takes only
+// the host blob's realm engine and crypto: nothing is evaluated from a string, so the page's
+// CSP needs no 'unsafe-eval'. The node is assembled by that host's `standUp`: the transport
+// bundle pinned to its own author, the channel adapter built from the `transport` options
+// passed to it. The page's admit is then ONLY its consent gate — who may be the network is
+// the assembly's, so nobody can lose it by forgetting it.
+import { browserPlatform } from "seedkernel-wasm/platform-web";
+import { platformHost } from "seedkernel-wasm/platform";
+import { hostBlob } from "./host-blob.js";
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
-// arguments, which is what the host's own door into the network takes (see `netOp`).
+// arguments, which is what the host's own door into the network takes (peers.js `net`).
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 // The sockets: a WebSocket for the relay the transport meets and links peers through, and
@@ -18,34 +21,24 @@ import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
-// Rooms are this page's, not the transport's: it meets peers in a relay room with
-// seedrelay's room client and hands their keys to the transport, which knows only keys
-// and the relays that reach them.
-import { roomClient, roomId } from "seedrelay/rooms";
+// Who this page is linked to and why: the relay, its rooms, its contacts and the nicks
+// (peers.js), which the shell with no page follows its peers through too.
+import { Peers, ROOM_NAME_RE, friendlyRoom } from "./peers.js";
+import { roomId } from "seedrelay/rooms";
 // The shell's own code. media-rtc.js is the call feature: audio and video ride peer
 // connections this page owns, signaled through the shell boot bundle below.
 import { MediaCalls } from "./media-rtc.js";
 // The contract with the apps this shell hosts: what it reads off a bundle, what it lets one
 // reach, and the two ops it calls on an app's guest. Nothing in it, or in this file, knows
 // what any one app does.
-import { APP_GRANTS, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, admitGate, appFacts, bundleDigest, contextJson } from "./app-api.js";
+import { APP_GRANTS, APP_OP_CONTEXT, APP_OP_UI, MAX_QUEUED_RENDERS, admitGate, appFacts, bundleDigest, toHex, fromHex } from "./app-api.js";
 // What keeps a view off the network: the page an app's view is loaded as.
 import { guardView } from "./view-guard.js";
-// The offers app: a second boot bundle, loaded right below alongside the transport —
-// see "boot the offers app" further down for why a bundle rather than a page-held name.
-import { OFFERS_KEY_PREFIX, OFFERS_OP_SEND } from "./offers-app.js";
-import { offersBundleBytes, OFFERS_AUTHOR_HEX, OFFERS_APP } from "./offers-bundle.js";
-// The shell app: a third boot bundle, how this page talks to a peer's. What each tells the
-// other about itself rides one of its claims, and a call's signaling the other.
-import { CALL_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL } from "./shell-app.js";
+// The shell app: the page's own boot bundle, how this page talks to a peer's. What each
+// tells the other about itself rides one of its claims, a call's signaling another, and an
+// offer of an app the third.
+import { CALL_PROTO, OFFER_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL, SHELL_OP_OFFER } from "./shell-app.js";
 import { shellBundleBytes, SHELL_AUTHOR_HEX, SHELL_APP } from "./shell-bundle.js";
-
-// The media calls' peer connections ask the relay for their address, as the transport's do
-// (seedkernel §12.7), so no third party learns who is calling: `connectRelay` points this at
-// the relay it joins.
-const RTC_CONFIG = { iceServers: [] };
-/** A seedrelay answers STUN on this UDP port. */
-const RELAY_STUN_PORT = 3478;
 
 const shellLog = document.getElementById("shell-log");
 const relayUrlInput = document.getElementById("relay-url");
@@ -139,41 +132,57 @@ function shellPrint(text, cls) {
   shellLog.scrollTop = shellLog.scrollHeight;
 }
 
-function bytesToHex(b) {
-  return Array.from(b).map(x => x.toString(16).padStart(2, "0")).join("");
-}
-
-function hexToBytes(hex) {
-  const out = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
-  return out;
-}
-
 /** 32 bytes as lowercase hex: a key or a contact secret. */
 const HEX32_RE = /^[0-9a-f]{64}$/;
 
+/** Run `act` when Enter is pressed in `field`, in place of what Enter would do there. */
+function onEnter(field, act) {
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); act(); }
+  });
+}
+
+/** What `field` holds as 32 bytes of hex: the bytes, null for an empty field, or undefined
+ *  for anything else, which the field is then marked with, saying `why`. A mark goes as
+ *  soon as the field is typed in (`hexField`). */
+function readHex32(field, why) {
+  const typed = field.value.trim().toLowerCase();
+  if (typed === "") return null;
+  if (HEX32_RE.test(typed)) return fromHex(typed);
+  field.setCustomValidity(why);
+  field.reportValidity();
+  return undefined;
+}
+
+/** A field that takes 32 bytes of hex, `act` run by Enter in it. */
+function hexField(field, act) {
+  field.addEventListener("input", () => field.setCustomValidity(""));
+  onEnter(field, act);
+}
+
+/** A small button, as every list here has them. */
+function iconButton(label, onClick, title) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon";
+  btn.textContent = label;
+  if (title) btn.title = title;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
 shellPrint("Starting the shell...", "sys");
-// The host blob this page is served (seedkernel's build/host.skb, vendored): the host
-// script, the realm engine every guest runs on, and the host's crypto, libsodium and
-// ML-DSA-65, which run on WebAssembly here as on every seedkernel target. Its `sodium` is
-// the page's too, ready before anything below touches it: verifyBundle needs the PQ
-// signature half for ANY bundle, and it is synchronous.
+// The host blob (host-blob.js): the realm engine every guest runs on, and the host's
+// crypto, libsodium and ML-DSA-65, which run on WebAssembly here as on every seedkernel
+// target. Its `sodium` is the page's too, ready before anything below touches it:
+// verifyBundle needs the PQ signature half for ANY bundle, and it is synchronous.
 //
 // This runtime only VERIFIES suite 0x02 bundle envelopes (§12.4, §14.1). Bundle
 // authoring is offline and lives behind seedkernel-wasm/bundle-author, which is not
 // shipped in the browser runtime tree.
-const hostBlobUrl = new URL("./vendor/host.skb", import.meta.url);
-const hostBlobRes = await fetch(hostBlobUrl, { cache: "no-store" });
-// A page that does not serve the file answers with an error page, which would otherwise
-// fail later as a malformed blob.
-if (!hostBlobRes.ok) throw new Error(`${hostBlobUrl.href} was not served (HTTP ${hostBlobRes.status})`);
-const host = browserHost({ hostBlob: new Uint8Array(await hostBlobRes.arrayBuffer()) });
+const host = platformHost(browserPlatform({ hostBlob: await hostBlob }));
 const sodium = host.sodium;
 
-// The host (its shell, admission policy and `install`) is assembled once the
-// identity exists — see the boot sequence below. It is declared here because handlers
-// defined above reach it through `shell`.
-//
 // Ongoing-consent admission (§12.4): the user approves each unique bundle before it
 // runs. `pendingApprovals` holds the digests of the bundles the user has consented to
 // (`bundleDigest`, app-api.js: the whole bundle, guest included); the shell's `admit`
@@ -182,28 +191,6 @@ const sodium = host.sodium;
 const pendingApprovals = new Set();
 /** The one system hash (seedkernel's BLAKE2b-256), with its crypto bound. */
 const digest = (bytes) => genesisHash(sodium, bytes);
-let shell;
-// The relay this page is on: its origin, its secret if it is private, and seedrelay's room
-// client there. null while it is on none: before Connect, and after Disconnect.
-let relay = null;
-// The rooms this page is in, by name: `id` is the room's id on the relay, in hex, and
-// `members` the keys the room client last heard are in it. A page may be in several.
-const joinedRooms = new Map();
-// Everyone this page wants a link to, by key in hex: its room-mates and its contacts, each
-// with how the call to it stands (`callPeer`, further down).
-const wanted = new Map();
-// The linked peers as the transport last told them (`onStatus`): each with how it is reached,
-// `{ id, direct }`, and the same peers by key in hex, which is what the apps are told is
-// linked (`postContext`).
-let routesNow = [];
-let linkedNow = [];
-// What each peer calls itself, by key in hex: its nick, shown in the Network tab's lists in
-// place of the key, and told to every app (`contextNow`). A peer's own word for itself.
-const peerNicks = new Map();
-/** The longest nick kept, a peer's or this node's. */
-const MAX_NICK = 32;
-// What this node calls itself: its nick, or "" for none. Kept with the identity.
-let myNick = (sessionStorage.getItem("shell.nick") ?? "").slice(0, MAX_NICK);
 // The notices peers are owed, by key in hex: true for one this node added, false for one
 // it removed. Each is sent once its peer is linked (`tellPeers`).
 const untoldPeers = new Map();
@@ -226,41 +213,18 @@ if (stored) {
     sk: Array.from(kp.privateKey),
   }));
 }
-const myPkHex = bytesToHex(myKeys.publicKey);
+const myPkHex = toHex(myKeys.publicKey);
 
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
-// ─── rooms, contacts and the contact secret ────────────────────────────
+// ─── the contact secret ────────────────────────────────────────────────
 //
-// Two ways to be linked to a peer, and one gate:
-//
-//   A ROOM has no secret. Joining one is agreeing to be linked to everyone in it, and this
-//   page may be in several at once. The transport is told who the room-mates are
-//   (`welcome`), and answers their calls whether or not they hold the contact secret.
-//
-//   A CONTACT is one peer, by key, linked whatever room either is in: a direct connection.
-//   Calling a contact takes its contact secret, if it has one.
-//
-//   The CONTACT SECRET is this node's own (seedkernel §12.6.3): 32 bytes a caller must
-//   present to be answered at all, unless it is a room-mate. None, and anyone may call.
-//
-// `myContactSecret` is this node's, or null. `contacts` holds the contacts, by key in hex,
-// each with its contact secret or null. Both are kept with the identity, as the rooms are.
+// What a room, a contact and a contact secret are is peers.js's. `myContactSecret` is this
+// node's, or null, kept with the identity, as the contacts and the rooms are.
 const savedContact = sessionStorage.getItem("shell.contactSecret");
-let myContactSecret = savedContact && HEX32_RE.test(savedContact) ? hexToBytes(savedContact) : null;
-const contacts = new Map();
-try {
-  for (const [key, secret] of Object.entries(JSON.parse(sessionStorage.getItem("shell.contacts") ?? "{}"))) {
-    if (HEX32_RE.test(key)) contacts.set(key, HEX32_RE.test(secret) ? hexToBytes(secret) : null);
-  }
-} catch {}
+let myContactSecret = savedContact && HEX32_RE.test(savedContact) ? fromHex(savedContact) : null;
 
-function saveContacts() {
-  sessionStorage.setItem("shell.contacts",
-    JSON.stringify(Object.fromEntries([...contacts].map(([k, s]) => [k, s ? bytesToHex(s) : ""]))));
-}
-
-// The tab's sockets, standing before the transport: bootShell registers its accept sink
+// The tab's sockets, standing before the transport: the assembly registers its accept sink
 // while starting it, and RtcNetwork announces every data channel through that sink. The
 // transport itself opens the relay (a WebSocket), links through it, and drives the peer
 // connections.
@@ -271,123 +235,106 @@ const net = combineChannels(new WsNetwork(), new RtcNetwork());
 // realm engine, private modules in workers, and an in-memory store and freshness marks;
 // the page adds its identity and the channel adapter, which the assembly CONSTRUCTS from
 // the `transport` options (identity taken from the top-level fields, never restated) and
-// returns with the shell. The adapter is the platform's: link ids and sockets. Transport policy belongs
-// to the signed bundle, and so does the address book — it lives in that bundle's own realm
-// now (§12.10), and the page writes nothing to it: a peer here is met in the relay room the
-// transport joins, and linked by it.
-// The sockets above are passed in as `channels`; bootShell registers their accept sink
-// while starting the transport. Raw-link
-// events then go only to whichever admitted slot owns the `link` binding, and
-// `shell.close()` closes the whole stack.
+// returns with the shell. The adapter is the platform's: link ids and sockets, the ones
+// above passed in as `channels`. Raw-link events then go only to whichever admitted slot
+// owns the `link` binding, and `shell.close()` closes the whole stack. Transport policy
+// belongs to the signed bundle, and so does the address book, in that bundle's own realm
+// (§12.10).
 //
-// Contact policy belongs to the signed transport guest. This node's contact secret is
-// its config here, so the gate stands before anything can call, and `setMyContact`
-// changes it later with the guest's `contact` op. Who is linked follows the rooms and
-// contacts (`syncPeers`), a peer at a time, without reloading the transport.
+// `standUp` builds the rest of the node's options itself (the crypto, store, modules and
+// realm engine are the platform's) and takes from the page only the fields
+// below — `dir`, `identity`, `admit`, `transport`, `guestDeadlineMs` and
+// `realmMemoryBytes` (seedkernel's `NodeSetup`). Anything else passed here is dropped.
 //
-// bootShell installs the seedkernel-shipped transport bundle at boot and
-// starts the ChannelFactory before returning. Connecting to a relay is the transport's
-// `relay` op: it registers there, joins the room and links the peers it meets.
+// This node's contact secret is the transport's config here, so the gate stands before
+// anything can call, and `setMyContact` changes it later with the guest's `contact` op.
+// Who is linked follows the rooms and contacts (peers.js), a peer at a time, without
+// reloading the transport.
 //
-// The realm engine every app's guest runs in — the transport bundle's, the offers
-// app's, and each installed app's — is the host blob's qjs.wasm, on WebAssembly.
-//
-// The page serves no name of its own: dispatch is a single claim → bundle
-// slot map (seedkernel §12.10), and there is no owner but a signed bundle. `admit` is
-// ONE predicate (§12.5), and it composes two things that are actually the page's: the
-// offers boot bundle's author+app pin (below — deployment-shipped bytes, not a consent
-// prompt) and the user-consent gate for every other app. The transport never reaches
-// this gate: bootShell installs it by selection (§12.5).
-const booted = await host.standUp({
+// The page serves no name of its own: dispatch is a single claim → bundle slot map
+// (seedkernel §12.10), and there is no owner but a signed bundle. `admit` is ONE predicate
+// (§12.5), and it composes two things that are actually the page's: the shell boot
+// bundle's author+app pin (deployment-shipped bytes, not a consent prompt) and the
+// user-consent gate for every other app. The transport never reaches this gate: the
+// assembly installs it by selection (§12.5).
+const { shell } = await host.standUp({
   // Where the store keeps this node's files, in the platform's memory.
   dir: "shell",
   identity: myKeys,
-  // The transport asks the relay a peer is linked through for STUN (§12.7). A room
-  // keeps its members linked, so links do not idle out; the page redials a member whose
-  // link drops (`followPeers`).
+  // A room keeps its members linked, so links do not idle out; the page redials a member
+  // whose link drops (peers.js `follow`).
   transport: {
     channels: net,
-    onStatus,
-    config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: bytesToHex(myContactSecret) } : {}) },
+    onStatus: (status) => onStatus(status),
+    config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: toHex(myContactSecret) } : {}) },
   },
-  // The offers and shell apps are pinned: the exact author and app this PAGE was built with
-  // (browser/offers-bundle.js and browser/shell-bundle.js, generated by
-  // scripts/build-boot-bundles.mjs), read off the artifact rather than restated by hand.
-  // Every other bundle is an app the user consented to, named by the digest of all of it: a
-  // consent to one guest admits no other beside the same module (`admitGate`, app-api.js).
-  admit: admitGate([{ author: OFFERS_AUTHOR_HEX, app: OFFERS_APP }, { author: SHELL_AUTHOR_HEX, app: SHELL_APP }],
-    pendingApprovals, digest),
+  // The shell app is pinned: the exact author and app this PAGE was built with
+  // (browser/shell-bundle.js, which scripts/build-app-bundle.mjs writes), read off the
+  // artifact rather than restated by hand. Every other bundle is an app the user consented
+  // to, named by the digest of all of it: a consent to one guest admits no other beside the
+  // same module (`admitGate`, app-api.js).
+  admit: admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], pendingApprovals, digest),
 });
-shell = booted.shell;
 
-// ─── boot the offers app ────────────────────────────────────────────────
-//
-// `offer/v1` carries a signed bundle from one browser to another, and the app that
-// would handle it is the thing being offered — so until an offer is accepted there is
-// no app to route it to, and something already installed at boot has to own the name
-// (browser/offers-app.js). A second boot bundle, loaded here right beside the
-// transport, separately because it is the page's own pinned boot bundle rather than part
-// of bootShell's transport assembly. It owns `offer/v1` both ways: a peer's offer arrives
-// through it, and this node's own leave through its `send` op (`offerApp`).
-//
-// `onInbound` is the one gap a single claim → bundle-slot map leaves open (seedkernel
-// §12.10): the wire consumes a delivery's answer on its way back out, so the page's own
-// view of "a fresh offer arrived" has no other path to it. A non-empty answer is the
-// offer's hash — the guest's own dedupe key (browser/offers-app.js) — so read the fs
-// record it just wrote and hand it to `handleOffer` (declared further down; a hoisted
-// function declaration, and never actually reached until the app registry below has
-// stood up the state it reads).
-const offersApp = await shell.install(offersBundleBytes(), {
-  onInbound: (claim, from, answer) => {
-    if (answer.length === 0) return; // a duplicate the guest already had — nothing new
-    const key = OFFERS_KEY_PREFIX + bytesToHex(answer);
-    offersApp.fs.get(key).then((record) => {
-      if (!record) return;
-      handleOffer(record.subarray(32), bytesToHex(record.subarray(0, 32)), key).catch(() => {});
-    });
+// Who this page is linked to and why (peers.js). What it shows of them is drawn again each
+// time that may have changed (`followPeers`), and the rooms each time who is in them has.
+const peers = new Peers({
+  shell, identity: myKeys, sodium,
+  tell: tellPage,
+  changed: () => followPeers(),
+  onRooms: (renamed) => {
+    if (renamed) sessionStorage.setItem("shell.rooms", JSON.stringify([...peers.rooms.keys()]));
+    renderRoomList();
   },
+  onRefused: (name) => shellPrint(`Room ${friendlyRoom(name)} is full; try again later.`, "err"),
 });
+peers.setNick(sessionStorage.getItem("shell.nick") ?? "");
+try {
+  for (const [key, secret] of Object.entries(JSON.parse(sessionStorage.getItem("shell.contacts") ?? "{}"))) {
+    if (HEX32_RE.test(key)) peers.contacts.set(key, HEX32_RE.test(secret) ? fromHex(secret) : null);
+  }
+} catch {}
+
+function saveContacts() {
+  sessionStorage.setItem("shell.contacts",
+    JSON.stringify(Object.fromEntries([...peers.contacts].map(([k, s]) => [k, s ? toHex(s) : ""]))));
+}
 
 // ─── boot the shell app ─────────────────────────────────────────────────
 //
 // What this page says to a peer's rides the node's own authenticated channel, under the
-// two claims the shell boot bundle holds (shell-app.js). A peer's frame reaches the page as
-// that load's `onInbound` answer, attributed by the channel it arrived on and told apart by
-// the claim it arrived under; ours leave through the same app's two ops, since only a guest
-// can reach `_net`.
+// three claims the shell boot bundle holds (shell-app.js). A peer's frame reaches the page
+// as that load's `onInbound` answer, attributed by the channel it arrived on and told apart
+// by the claim it arrived under; ours leave through the same app's three ops, since only a
+// guest can reach `_net`.
 //
 //   shell/v1   what a page tells another about itself (`onPageNotice`): `{ peer: true }`
 //              from a page that added this node as a peer and `{ peer: false }` from one
 //              that removed it, and `{ nick }`, what a peer calls itself.
 //   call/v1    a call's signaling. Its audio and video ride peer connections this page owns
 //              (media-rtc.js), beside the transport's.
+//   offer/v1   an app a peer offers (`handleOffer`), a signed bundle.
 const shellApp = await shell.install(shellBundleBytes(), {
   onInbound: (claim, from, answer) => {
     if (answer.length === 0) return;
-    if (claim === CALL_PROTO) void media.onSignal(bytesToHex(from), answer);
-    else onPageNotice(bytesToHex(from), answer);
+    if (claim === CALL_PROTO) void media.onSignal(toHex(from), answer);
+    else if (claim === OFFER_PROTO) handleOffer(answer, toHex(from));
+    else onPageNotice(toHex(from), answer);
   },
 });
 
-/** Hand `bytes` to a peer's page through one of the shell app's two ops, each of which
+/** Hand `bytes` to a peer's page through one of the shell app's three ops, each of which
  *  sends under one of its protocols. */
 function sendPage(op, peerId, bytes) {
   const arg = new Uint8Array(32 + bytes.length);
-  arg.set(hexToBytes(peerId), 0);
+  arg.set(fromHex(peerId), 0);
   arg.set(bytes, 32);
   return shellApp.invoke(writeOp(op, arg));
 }
 
-/** Tell a peer's page something about this one, under shell/v1: whether that page got it.
- *  The transport dials a peer it is sent to and has an address for (seedkernel §12.6), so
- *  telling a peer with no link is also what calls it (`callPeer`). */
+/** Tell a peer's page something about this one, under shell/v1: whether that page got it. */
 async function tellPage(peerId, notice) {
   return (await sendPage(SHELL_OP_TELL, peerId, notice))[0] === 1;
-}
-
-/** Send a peer's page one signal of a call, under call/v1. */
-function sendSignal(peerId, signal) {
-  return sendPage(SHELL_OP_SIGNAL, peerId, signal);
 }
 
 /** What a peer's page tells this one about itself, already attributed by the channel it
@@ -399,26 +346,27 @@ function onPageNotice(from, bytes) {
   // What the peer calls itself, an empty nick for nothing: shown in place of its key, by
   // this page and by every app.
   if (typeof msg?.nick === "string") {
-    if (msg.nick) peerNicks.set(from, msg.nick.slice(0, MAX_NICK)); else peerNicks.delete(from);
+    peers.heardNick(from, msg.nick);
     renderRoomList();
-    renderPeerList(routesNow);
-    postContext();
+    followPeers();
     return;
   }
   if (typeof msg?.peer !== "boolean") return;
-  if (msg.peer && !contacts.has(from)) {
+  if (msg.peer && !peers.contacts.has(from)) {
     addContact(from, null, { tell: false });
-    shellPrint(`${peerLabel(from)} added you as a peer.`, "sys");
-  } else if (!msg.peer && contacts.has(from)) {
+    shellPrint(`${peers.label(from)} added you as a peer.`, "sys");
+  } else if (!msg.peer && peers.contacts.has(from)) {
     removeContact(from, { tell: false });
-    shellPrint(`${peerLabel(from)} removed you as a peer.`, "sys");
+    shellPrint(`${peers.label(from)} removed you as a peer.`, "sys");
   }
 }
 
 const media = new MediaCalls({
   myId: myPkHex,
-  rtcConfig: RTC_CONFIG,
-  send: sendSignal,
+  // A call's peer connections ask the STUN the transport's do (seedkernel §12.7), the relay
+  // the peer is reached through, so no third party learns who is calling.
+  iceServers: (peerId) => peers.ice(peerId),
+  send: (peerId, signal) => sendPage(SHELL_OP_SIGNAL, peerId, signal),
   onCallers: () => callersChanged(),
   onPeerClosed: (peerId) => {
     removeRemoteTile(peerId);
@@ -471,39 +419,21 @@ function setRelayPill(state, label) {
   relayPillText.textContent = label;
 }
 
-// Links are the TRANSPORT GUEST's own. What the page tells it, a relay to register on or a
-// peer's address, goes through `shell.call` — the host's door into a co-resident guest's
-// `services` claim (seedkernel §12.10), the same one seedkernel's CLI uses for a cohort —
-// composed with seedkernel's own `OpArgs`, so the argument writer and the transport's reader
-// move in one artifact. `null` there is "nothing claims that id": a node with no transport
-// standing.
-//
-// What the transport tells the page comes the other way (bootShell's `onStatus`): the
-// relay's state, who is linked and how each is reached, each time any of it changes: the
-// relay's state (`showRelay`), and each linked peer's key with whether its link has moved
-// off the relay to WebRTC (seedkernel §12.7). So the page hears of a change as it happens,
-// and asks nothing.
-function onStatus({ relay, linked }) {
-  relayNow = relay;
+// What the transport tells the page (`onStatus`, peers.js `status`): the relay's state, who
+// is linked and how each is reached, each time any of it changes: the relay's state
+// (`showRelay`), and each linked peer's key with whether its link has moved off the relay
+// to WebRTC (seedkernel §12.7). So the page hears of a change as it happens, and asks
+// nothing.
+function onStatus(status) {
+  peers.status(status);
   showRelay();
-  routesNow = linked.map(({ key, direct }) => ({ id: bytesToHex(key), direct }));
-  followPeers();
-}
-
-/** Rotate the transport guest's inbound contact gate. Empty means open (§12.6.3). */
-async function setTransportContact(secret) {
-  const answer = shell.call(NET_PROTO, new OpArgs("contact")
-    .blob(secret ?? new Uint8Array(0))
-    .build());
-  if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  await answer;
 }
 
 // The pill counts the linked peers, and says how many of them the relay still forwards:
 // green once every link is direct, amber while any is relayed.
-function updatePeerPill(routes) {
-  const open = routes.length;
-  const relayed = routes.filter((r) => !r.direct).length;
+function updatePeerPill() {
+  const open = peers.linked.size;
+  const relayed = [...peers.linked.values()].filter((direct) => !direct).length;
   peerPillText.textContent = (open === 1 ? "1 peer" : `${open} peers`) + (relayed > 0 ? ` · ${relayed} via relay` : "");
   peerPill.classList.toggle("ok", open > 0 && relayed === 0);
   peerPill.classList.toggle("warn", relayed > 0);
@@ -542,31 +472,19 @@ function buildPeerRow(id) {
   secret.autocomplete = "off";
   secret.spellcheck = false;
   secret.setAttribute("aria-label", `Contact secret of ${id.slice(0, 8)}`);
-  const connect = document.createElement("button");
-  connect.type = "button";
-  connect.className = "icon";
-  connect.textContent = "Connect";
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "icon";
-  remove.textContent = "Remove peer";
-  remove.title = "Stop being a contact: the link goes unless you share a room.";
+  const connect = iconButton("Connect", () => connectPeer(id, secret));
+  const remove = iconButton("Remove peer", () => removeContact(id), "Stop being a contact: the link goes unless you share a room.");
   const state = document.createElement("span");
-  connect.addEventListener("click", () => connectPeer(id, secret));
-  secret.addEventListener("input", () => secret.setCustomValidity(""));
-  secret.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); connectPeer(id, secret); }
-  });
-  remove.addEventListener("click", () => removeContact(id));
+  hexField(secret, () => connectPeer(id, secret));
   secret.hidden = connect.hidden = remove.hidden = true;
   li.append(name, secret, connect, remove, state);
   return { li, name, secret, connect, remove, state, shown: "" };
 }
 
-function renderPeerList(routes) {
-  const linked = new Map(routes.map((r) => [r.id, r.direct]));
+function renderPeerList() {
+  const { linked, wanted, contacts } = peers;
   const ids = [...new Set([...linked.keys(), ...wanted.keys()])]
-    .filter((id) => contacts.has(id) || (linked.has(id) && roomsOf(id).length === 0))
+    .filter((id) => contacts.has(id) || (linked.has(id) && peers.roomsOf(id).length === 0))
     .sort();
   for (const [id, row] of peerRows) {
     if (!ids.includes(id)) { row.li.remove(); peerRows.delete(id); }
@@ -579,14 +497,14 @@ function renderPeerList(routes) {
     // would take the focus from its field.
     if (peerListEl.children[i + 1] !== row.li) peerListEl.insertBefore(row.li, peerListEl.children[i + 1] ?? null);
     const isLinked = linked.has(id), isContact = contacts.has(id);
-    const label = peerLabel(id);
+    const label = peers.label(id);
     const state = isLinked ? (linked.get(id) ? "direct" : "relayed") : wanted.get(id).silent ? "silent" : "calling";
     const shown = `${state} ${isContact} ${label}`;
     if (shown === row.shown) return;
     // The field holds what this node presents to the contact, shown again each time the
     // row comes to need it.
     const asks = isContact && !isLinked;
-    if (asks && row.secret.hidden) row.secret.value = contacts.get(id) ? bytesToHex(contacts.get(id)) : "";
+    if (asks && row.secret.hidden) row.secret.value = contacts.get(id) ? toHex(contacts.get(id)) : "";
     row.secret.hidden = row.connect.hidden = !asks;
     row.name.textContent = label;
     // A contact is removed here; one is added from a room's list, or by its link or key.
@@ -644,7 +562,7 @@ let activeAppKey = null;
 // replacing it. `shell.resolve` answers who holds one; the Apps panel reads the claim off
 // the manifest rather than storing anything.
 
-const STORE = "apps.v2";
+const STORE = "apps.v3";
 
 // ── an app's guest ──────────────────────────────────────────────────────
 //
@@ -660,37 +578,25 @@ function invokeApp(rec, op, bytes) {
   return rec.invoke(writeOp(op, bytes));
 }
 
-/** The node's context, as every app's guest is told it (`contextJson`, app-api.js): who
- *  this node is and what it calls itself, its rooms and who the relay says is in each, the
- *  linked peers, the contacts, and what each peer calls itself. All of it is the shell's
- *  to know, and none of it is a secret: a contact's secret stays here. */
-function contextNow() {
-  return contextJson({
-    me: myPkHex,
-    nick: myNick,
-    rooms: [...joinedRooms].map(([name, r]) =>
-      ({ id: r.id, name: friendlyRoom(name), members: [...r.members].sort() })),
-    linked: [...linkedNow].sort(),
-    contacts: [...contacts.keys()].sort(),
-    nicks: Object.fromEntries([...peerNicks].sort(([a], [b]) => (a < b ? -1 : 1))),
-  });
+/** Tell one app's guest the node's context as it now stands (peers.js `context`: who this
+ *  node is and what it calls itself, its rooms and who the relay says is in each, the
+ *  linked peers, the contacts, and what each peer calls itself; none of it a secret), and
+ *  answer what the guest answered, render bytes for its view, or nothing. */
+async function tellContext(rec) {
+  const json = rec.ctx = peers.context();
+  try { return await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)); }
+  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); return new Uint8Array(0); }
 }
 
-/** Tell one app's guest the context, and hand its view the answer. */
-async function tellContext(rec, json) {
-  rec.ctx = json;
-  try {
-    deliverRender(rec, await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)), { isContext: true });
-  }
-  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); }
-}
-
-/** Tell every app whose guest has not heard the context as it now stands. Called wherever
- *  it may have changed: a room joined or left, a member heard, a contact added, a peer
- *  linked, a nick told. A guest is told once per change, however often this is called. */
+/** Tell every app whose guest has not heard the context as it now stands, and hand its view
+ *  the answer. Called wherever it may have changed: a room joined or left, a member heard, a
+ *  contact added, a peer linked, a nick told. A guest is told once per change, however often
+ *  this is called. */
 function postContext() {
-  const json = contextNow();
-  for (const rec of installedApps.values()) if (rec.ctx !== json) void tellContext(rec, json);
+  const json = peers.context();
+  for (const rec of installedApps.values()) {
+    if (rec.ctx !== json) void tellContext(rec).then((answer) => deliverRender(rec, answer, { isContext: true }));
+  }
 }
 
 // ── an app's view ───────────────────────────────────────────────────────
@@ -713,9 +619,6 @@ function postContext() {
 // allow-downloads lets a view hand the user a file it has put together, as a link to a
 // blob of its own: jam saves a track that way. A file is all it is. The view still reads
 // and writes nothing on disk, and the browser shows a download like any other.
-
-/** Renders held for a view that has not said it is ready; past this the oldest go. */
-const MAX_QUEUED_RENDERS = 512;
 
 function mountView(rec) {
   if (!rec.ui) return;
@@ -751,7 +654,7 @@ function unmountView(rec) {
  *  tab's unread dot is for when the user is looking at another tab. */
 function deliverRender(rec, payload, { fromPeer = false, isContext = false } = {}) {
   if (!rec.ui || payload.length === 0) return;
-  if (rec.ready) rec.frame.contentWindow.postMessage({ type: "render", payload }, "*");
+  if (rec.ready) postRender(rec.frame, payload);
   else if (!isContext) {
     rec.queue.push(payload);
     if (rec.queue.length > MAX_QUEUED_RENDERS) rec.queue.shift();
@@ -766,16 +669,18 @@ function deliverRender(rec, payload, { fromPeer = false, isContext = false } = {
  *  view that already knows the room it is in. */
 async function viewReady(rec) {
   const frame = rec.frame;
-  const json = contextNow();
-  rec.ctx = json;
-  let context = new Uint8Array(0);
-  try { context = await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)); }
-  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); }
+  const context = await tellContext(rec);
   if (!frame || rec.frame !== frame) return; // removed or replaced meanwhile
   rec.ready = true;
   for (const payload of [context, ...rec.queue.splice(0)]) {
-    if (payload.length > 0) frame.contentWindow.postMessage({ type: "render", payload }, "*");
+    if (payload.length > 0) postRender(frame, payload);
   }
+}
+
+/** Post one render to a view. It is copied, not handed over: an answer to a peer's frame is
+ *  also what the transport answers that peer with. */
+function postRender(frame, payload) {
+  frame.contentWindow.postMessage({ type: "render", payload }, "*");
 }
 
 // ── reading a bundle ────────────────────────────────────────────────────
@@ -791,10 +696,12 @@ function peekBundle(bundleBytes) {
   try { v = verifyBundle(sodium, bundleBytes); }
   catch { throw new Error("not a valid app bundle (.skb)"); }
   return {
-    app: v.manifest.app,
-    authorPk: v.author,
+    // The label it installs under (§12.4), a fact of the signed manifest, so the page has it
+    // BEFORE the install.
+    key: v.manifest.app,
+    authorPk: v.author.slice(),
     // What a consent to this bundle names, and what tells two bundles apart.
-    hash: bytesToHex(bundleDigest(v, digest)),
+    hash: toHex(bundleDigest(v, digest)),
     ...appFacts(v.manifest),
   };
 }
@@ -802,35 +709,24 @@ function peekBundle(bundleBytes) {
 // Install a bundle the user has consented to: by dropping it, by accepting its offer, or
 // by having installed it before a reload. Calls the shared §12.4 installer, which
 // verifies the bundle signatures, checks the admit gate, and stands the slot. Returns the
-// AppRecord.
-async function applyAppBundle(bundleBytes) {
-  const peeked = peekBundle(bundleBytes);
-  // The label this bundle installs under (§12.4) — a fact of the signed manifest, so the
-  // page has it BEFORE the install, and the onInbound closure below just closes over the
-  // record rather than waiting for a handle to fill it in.
-  const key = peeked.app;
+// AppRecord. `peeked` is what `peekBundle` read of it, for a bundle already read.
+async function applyAppBundle(bundleBytes, peeked = peekBundle(bundleBytes)) {
+  const { key } = peeked;
   // Taking a standing label over takes its data and signing scope with it. The app's own
   // author shipping its next version is the one-click upgrade; a different author's
   // bundle under the same label is asked about by name.
   const standing = installedApps.get(key);
-  if (standing && bytesToHex(standing.authorPk) !== bytesToHex(peeked.authorPk)
+  if (standing && toHex(standing.authorPk) !== toHex(peeked.authorPk)
       && !confirm(`Replace ${standing.name} ${standing.version} with ${peeked.name} ${peeked.version} ` +
-        `by a different author (${bytesToHex(peeked.authorPk).slice(0, 12)}…)?`)) {
+        `by a different author (${toHex(peeked.authorPk).slice(0, 12)}…)?`)) {
     throw new Error("replacing an app from a different author was declined");
   }
 
   const record = {
-    key,
-    name: peeked.name,
-    version: peeked.version,
-    description: peeked.description,
-    /** The manifest's signed claim (§12.10) and reach (§12.2), which its row shows. */
-    protocols: peeked.protocols,
-    requires: peeked.requires,
-    authorPk: peeked.authorPk.slice(),
-    hash: peeked.hash,
-    bundleBytes: bundleBytes.slice(),
-    ui: peeked.ui,
+    // What its row shows and its view is: the manifest's facts, its signed claim (§12.10)
+    // and reach (§12.2) among them.
+    ...peeked,
+    bundleBytes,
     /** The install's handle — the one loopback `invoke`, bound to this app's slot. */
     invoke: null,
     // Its view: the frame, whether it has said it is ready, and the renders held until then.
@@ -859,7 +755,7 @@ async function applyAppBundle(bundleBytes) {
       // to the frame it just served, and the installer that mounted it receives them
       // right here, off its own install — no second claim, and no 32-byte comparison
       // against a caller id, because the page already knows which app THIS install is.
-      onInbound: (claim, from, answer) => deliverRender(record, new Uint8Array(answer), { fromPeer: true }),
+      onInbound: (claim, from, answer) => deliverRender(record, answer, { fromPeer: true }),
     });
   } finally {
     pendingApprovals.delete(peeked.hash);
@@ -871,7 +767,7 @@ async function applyAppBundle(bundleBytes) {
   mountView(record);
   // Its guest starts with no context: tell it, without waiting for its view to load.
   postContext();
-  persistInstalledApps();
+  keepApp(record);
   renderAppList();
   return record;
 }
@@ -879,38 +775,60 @@ async function applyAppBundle(bundleBytes) {
 // ── persistence ────────────────────────────────────────────────────────
 // The packed bundle is the only piece of app state we need — the installed app and its
 // view both derive from it. We keep them in sessionStorage so a reload within the same
-// tab keeps the user's app set and lets transitive offers continue to work.
-function persistInstalledApps() {
+// tab keeps the user's app set and lets transitive offers continue to work: each bundle
+// under its label, as base64, written when it is installed and removed with it, and beside
+// them the labels in the order they were installed, and the app shown. Nothing else to
+// keep: the routing is a projection of the installed manifests (§12.10), so the bundles
+// ARE it, with no second store to fall out of step.
+const appKey = (label) => `${STORE}.app.${label}`;
+const appOrder = () => {
+  try { return JSON.parse(sessionStorage.getItem(`${STORE}.order`) ?? "[]"); } catch { return []; }
+};
+
+/** Bytes as base64, which a session store holds at 4 characters to 3 bytes. */
+function toBase64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+const fromBase64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+/** Keep `rec` for a reload. One the store has no room for is said, and runs until then. */
+function keepApp(rec) {
   try {
-    const arr = [];
-    for (const rec of installedApps.values()) {
-      arr.push(Array.from(rec.bundleBytes));
-    }
-    sessionStorage.setItem(STORE + ".bundles", JSON.stringify(arr));
-    // Nothing else to keep. The routing is a projection of the installed manifests
-    // (§12.10), so the bundles above ARE it: restoring them restores what this node
-    // serves, in the order it served them, with no second store to fall out of step.
-    if (activeAppKey) sessionStorage.setItem(STORE + ".active", activeAppKey);
-    else sessionStorage.removeItem(STORE + ".active");
+    sessionStorage.setItem(appKey(rec.key), toBase64(rec.bundleBytes));
+    sessionStorage.setItem(`${STORE}.order`, JSON.stringify([...appOrder().filter((k) => k !== rec.key), rec.key]));
+  } catch (err) {
+    shellPrint(`${rec.name} will not be here after a reload: ${err.message}`, "err");
+  }
+}
+
+function forgetApp(label) {
+  try {
+    sessionStorage.removeItem(appKey(label));
+    sessionStorage.setItem(`${STORE}.order`, JSON.stringify(appOrder().filter((k) => k !== label)));
+  } catch {}
+}
+
+function keepActiveApp() {
+  try {
+    if (activeAppKey) sessionStorage.setItem(`${STORE}.active`, activeAppKey);
+    else sessionStorage.removeItem(`${STORE}.active`);
   } catch {}
 }
 
 async function restoreInstalledApps() {
-  let arr;
-  try { arr = JSON.parse(sessionStorage.getItem(STORE + ".bundles") || "[]"); }
-  catch { return; }
-  if (!Array.isArray(arr)) return;
-  // Read before the replay: each install below saves the app set as it then stands, with
-  // no app shown yet.
-  const saved = sessionStorage.getItem(STORE + ".active");
-  // Replaying the bundles in the order they were stored reproduces the routing exactly:
+  // Read before the replay, which installs with no app shown yet.
+  const saved = sessionStorage.getItem(`${STORE}.active`);
+  // Replaying the bundles in the order they were installed reproduces the routing exactly:
   // each one lands on its own label and claims exactly what its manifest names, and a
   // contest with an already-restored app is refused rather than resolved by order
-  // (§12.10). So there is nothing else to restore, and no order-dependent outcome to
-  // reproduce beyond the list itself. A restored app cleared the consent gate when it was
-  // installed, which is the consent `applyAppBundle` installs it under.
-  for (const raw of arr) {
-    try { await applyAppBundle(new Uint8Array(raw)); }
+  // (§12.10). A restored app cleared the consent gate when it was installed, which is the
+  // consent `applyAppBundle` installs it under.
+  for (const label of appOrder()) {
+    const b64 = sessionStorage.getItem(appKey(label));
+    if (!b64) continue;
+    try { await applyAppBundle(fromBase64(b64)); }
     catch (err) { shellPrint(`Could not restore an app: ${err.message}`, "err"); }
   }
   if (saved && installedApps.has(saved)) setActiveApp(saved);
@@ -928,7 +846,7 @@ function setActiveApp(key) {
   for (const r of installedApps.values()) r.frame?.classList.toggle("hidden", r !== rec);
   appEmpty.classList.add("hidden");
   appStatus.textContent = `${rec.name} ${rec.version}`.trim();
-  persistInstalledApps();
+  keepActiveApp();
   renderAppList();
 }
 
@@ -937,89 +855,55 @@ function showNoApp() {
   for (const r of installedApps.values()) r.frame?.classList.add("hidden");
   appEmpty.classList.remove("hidden");
   appStatus.textContent = "no app loaded";
-  persistInstalledApps();
+  keepActiveApp();
 }
 
 // ── peer-to-peer app offers ────────────────────────────────────────────
 //
-// An offer is a packed app bundle forwarded over a data channel on `offer/v1`, the
-// offers app's own claim (browser/offers-app.js) — any peer who holds the bundle can
-// forward it (transitive offer), and the bundle carries the original author's signatures
-// over all of it, so the recipient still authenticates against the author (peekBundle
-// verifies it).
+// An offer is a packed app bundle forwarded over a data channel on `offer/v1`, a claim of
+// the shell boot bundle's (shell-app.js), since the app that would take it is the thing
+// being offered. Any peer who holds the bundle can forward it (transitive offer), and the
+// bundle carries the original author's signatures over all of it, so the recipient still
+// authenticates against the author (peekBundle verifies it).
 //
 // The relaying peer is identified by the AKE channel, not a signature — the frame is
 // unsigned; the bundle's own manifest signature is the load-bearing authentication.
-// `handleOffer` is reached two ways: fresh, off the offers app's `onInbound` (above),
-// and replayed from its fs at boot (`restoreOffers`, below) — both hand it the exact
-// same three things, because both read them off the same kind of record.
 //
-// Keyed by the offers app's OWN record key (`OFFERS_KEY_PREFIX + hex`, the blake2b-256
-// of the whole blob): it is already the fs key the record lives under, so accepting or
-// dismissing an offer can delete it with no second derivation.
-const pendingOffers = new Map();   // recordKey → { bundleBytes, peeked, fromPkHex }
+// An offer waits here, by the digest a consent to it would name, until it is accepted or
+// dismissed, or the page goes: what is waiting is this page's, and no store keeps it.
+const pendingOffers = new Map();   // bundle digest → { bundleBytes, peeked, fromPkHex }
 
-/** The most offers one peer has waiting here. The offers app keeps whatever arrives under
- *  `offer/v1` before anything has read it, in a store every app on this node shares, and an
- *  offer costs a peer one frame: so what is waiting is bounded here, where it is read. */
+/** The most offers one peer has waiting here. An offer costs a peer one frame, so what is
+ *  waiting is bounded where it is held. */
 const MAX_OFFERS_PER_PEER = 8;
 
-async function handleOffer(bundleBytes, fromPkHex, recordKey) {
-  // An offer that will never be shown is never accepted or dismissed either, which is what
-  // deletes a record: so its record goes now.
-  const drop = (why) => {
-    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${why}`, "err");
-    offersApp.fs.delete(recordKey).catch(() => {});
-  };
+function handleOffer(bundleBytes, fromPkHex) {
   let peeked;
   try { peeked = peekBundle(bundleBytes); }
   catch (err) {
-    drop(err.message);
+    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${err.message}`, "err");
     return;
   }
-
-  // Already running this exact bundle ⇒ nothing to offer. An update differs somewhere, in
-  // its guest or a module or its view, so its digest differs and it still surfaces for
-  // consent (installs are consent-gated, §12.4); only a redundant re-offer of what the
-  // user already has installed is dropped, so it never shows a pointless Install row. The
-  // record stays in the offers app's fs either way — the guest's own dedupe
-  // (browser/offers-app.js) already keeps it from growing on a repeat delivery of the
-  // identical bytes.
-  for (const rec of installedApps.values()) {
-    if (rec.hash === peeked.hash) return;
-  }
-  if (pendingOffers.has(recordKey)) return;
+  // Already running this exact bundle, or already offered it: nothing to offer. An update
+  // differs somewhere, in its guest or a module or its view, so its digest differs and it
+  // still surfaces for consent (installs are consent-gated, §12.4).
+  if (pendingOffers.has(peeked.hash) || [...installedApps.values()].some((rec) => rec.hash === peeked.hash)) return;
   if ([...pendingOffers.values()].filter((o) => o.fromPkHex === fromPkHex).length >= MAX_OFFERS_PER_PEER) {
-    drop(`it has ${MAX_OFFERS_PER_PEER} waiting here already`);
+    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: it has ${MAX_OFFERS_PER_PEER} waiting here already`, "err");
     return;
   }
-  pendingOffers.set(recordKey, { bundleBytes: bundleBytes.slice(), peeked, fromPkHex });
+  pendingOffers.set(peeked.hash, { bundleBytes, peeked, fromPkHex });
   renderOfferList();
   if (!tabs.apps.btn.classList.contains("active")) tabs.apps.btn.classList.add("unread");
   shellPrint(`${fromPkHex.slice(0, 8)} offers app "${peeked.name}" — see the Apps tab.`, "sys");
 }
 
-/** Everything the offers app's fs already holds, replayed into the pending-offer list
- *  at boot. The slot's fs IS the record — not a closure's Map — so this is what makes a
- *  reload (on a backend that persists, unlike this demo's in-memory default) pick up an
- *  offer that arrived and was never dismissed or accepted. */
-async function restoreOffers() {
-  for (const key of await offersApp.fs.list(OFFERS_KEY_PREFIX)) {
-    const record = await offersApp.fs.get(key);
-    if (!record) continue;
-    await handleOffer(record.subarray(32), bytesToHex(record.subarray(0, 32)), key);
-  }
-}
-
-async function acceptOffer(recordKey) {
-  const offer = pendingOffers.get(recordKey);
+async function acceptOffer(hash) {
+  const offer = pendingOffers.get(hash);
   if (!offer) return;
   try {
-    const rec = await applyAppBundle(offer.bundleBytes);
-    pendingOffers.delete(recordKey);
-    // The page holds the offers slot's host-side scoped fs view, so it deletes the
-    // record directly — the guest never needed a delete grant of its own.
-    offersApp.fs.delete(recordKey).catch(() => {});
+    const rec = await applyAppBundle(offer.bundleBytes, offer.peeked);
+    pendingOffers.delete(hash);
     renderOfferList();
     shellPrint(`Installed ${rec.name} ${rec.version} from offer.`, "sys");
     setActiveApp(rec.key);
@@ -1029,9 +913,8 @@ async function acceptOffer(recordKey) {
   }
 }
 
-function dismissOffer(recordKey) {
-  pendingOffers.delete(recordKey);
-  offersApp.fs.delete(recordKey).catch(() => {});
+function dismissOffer(hash) {
+  pendingOffers.delete(hash);
   renderOfferList();
 }
 
@@ -1041,23 +924,17 @@ function dismissOffer(recordKey) {
 // send: the host's driver holds sockets and no request face at all, and the network is
 // the transport, reached by calling the id it claims (§12.10). An app's own frames leave
 // through its own guest, and the shell never sees them. The shell's own leave through its
-// two boot bundles: what it tells a peer's page and a call's signals through the shell app
-// (`tellPage`, `sendSignal`), and an Offer through the offers app, which owns `offer/v1`
-// in both directions. No app's guest is borrowed to carry any of them.
+// boot bundle (`sendPage`): what it tells a peer's page, a call's signals and an Offer. No
+// app's guest is borrowed to carry any of them.
 
-// Send the stored bundle for `key` to every linked peer. Anyone who receives this can
-// forward it to others — that's transitivity for free.
+// Send the stored bundle for `key` to every linked peer, all at once. Anyone who receives
+// this can forward it to others — that's transitivity for free.
 async function offerApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
-  const linked = linkedNow;
-  for (const peerId of linked) {
-    const arg = new Uint8Array(32 + rec.bundleBytes.length);
-    arg.set(hexToBytes(peerId), 0);
-    arg.set(rec.bundleBytes, 32);
-    try { await offersApp.invoke(writeOp(OFFERS_OP_SEND, arg)); }
-    catch (err) { shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"); }
-  }
+  const linked = [...peers.linked.keys()];
+  await Promise.all(linked.map((peerId) => sendPage(SHELL_OP_OFFER, peerId, rec.bundleBytes)
+    .catch((err) => shellPrint(`offer to ${peerId.slice(0, 8)} failed: ${err.message}`, "err"))));
   const n = linked.length;
   shellPrint(
     n > 0
@@ -1130,50 +1007,50 @@ function appRowClaims(li, app) {
   li.appendChild(line);
 }
 
-function appRowButton(btns, label, cls, onClick) {
-  const btn = document.createElement("button");
-  btn.className = cls;
-  btn.textContent = label;
-  btn.addEventListener("click", onClick);
-  btns.appendChild(btn);
-  return btn;
+/** A row for an app, installed or offered: what it is, from whom if it was offered, and its
+ *  buttons, each `[label, class, onClick, disabled]`. */
+function appRow(app, { className, from, buttons }) {
+  const li = document.createElement("li");
+  li.className = className;
+  appRowHead(li, app);
+  appRowMeta(li, [["id", app.key], ["author", toHex(app.authorPk).slice(0, 8)],
+    ...(from ? [["from", from.slice(0, 8)]] : []), ["bundle", app.hash.slice(0, 12)]]);
+  appRowClaims(li, app);
+  const btns = document.createElement("div");
+  btns.className = "app-row-buttons";
+  for (const [label, cls, onClick, disabled = false] of buttons) {
+    const btn = document.createElement("button");
+    btn.className = cls;
+    btn.textContent = label;
+    btn.disabled = disabled;
+    btn.addEventListener("click", onClick);
+    btns.appendChild(btn);
+  }
+  li.appendChild(btns);
+  return li;
+}
+
+/** The row a list shows while it has nothing in it. */
+function emptyRow(text) {
+  const li = document.createElement("li");
+  li.className = "empty-row";
+  li.textContent = text;
+  return li;
 }
 
 function renderAppList() {
-  appListEl.innerHTML = "";
-  if (installedApps.size === 0) {
-    const li = document.createElement("li");
-    li.className = "empty-row";
-    li.textContent = "No apps installed yet.";
-    appListEl.appendChild(li);
-    return;
-  }
-  for (const rec of installedApps.values()) {
-    appListEl.appendChild(buildAppRow(rec));
-  }
-}
-
-function buildAppRow(rec) {
-  const li = document.createElement("li");
-  li.className = "app-row";
-  if (rec.key === activeAppKey) li.classList.add("active");
-  appRowHead(li, rec);
-  appRowMeta(li, [["id", rec.key], ["author", bytesToHex(rec.authorPk).slice(0, 8)], ["bundle", rec.hash.slice(0, 12)]]);
-  appRowClaims(li, rec);
-
-  const btns = document.createElement("div");
-  btns.className = "app-row-buttons";
-  if (rec.frame) {
-    const openBtn = appRowButton(btns, rec.key === activeAppKey ? "Active" : "Open", "icon primary", () => {
-      setActiveApp(rec.key);
-      showTab("app");
+  if (installedApps.size === 0) { appListEl.replaceChildren(emptyRow("No apps installed yet.")); return; }
+  appListEl.replaceChildren(...[...installedApps.values()].map((rec) => {
+    const active = rec.key === activeAppKey;
+    return appRow(rec, {
+      className: active ? "app-row active" : "app-row",
+      buttons: [
+        ...(rec.frame ? [[active ? "Active" : "Open", "icon primary", () => { setActiveApp(rec.key); showTab("app"); }, active]] : []),
+        ["Offer to peers", "icon", () => offerApp(rec.key)],
+        ["Remove", "icon danger", () => removeApp(rec.key)],
+      ],
     });
-    openBtn.disabled = rec.key === activeAppKey;
-  }
-  appRowButton(btns, "Offer to peers", "icon", () => offerApp(rec.key));
-  appRowButton(btns, "Remove", "icon danger", () => removeApp(rec.key));
-  li.appendChild(btns);
-  return li;
+  }));
 }
 
 function removeApp(key) {
@@ -1186,36 +1063,17 @@ function removeApp(key) {
   installedApps.delete(key);
   unmountView(rec);
   if (activeAppKey === key) showNoApp();
-  persistInstalledApps();
+  forgetApp(key);
   renderAppList();
 }
 
 function renderOfferList() {
-  offerListEl.innerHTML = "";
-  if (pendingOffers.size === 0) {
-    offersSection.hidden = true;
-    return;
-  }
-  offersSection.hidden = false;
-  for (const [key, offer] of pendingOffers) {
-    offerListEl.appendChild(buildOfferRow(key, offer));
-  }
-}
-
-function buildOfferRow(key, offer) {
-  const app = offer.peeked;
-  const li = document.createElement("li");
-  li.className = "app-row offer-row";
-  appRowHead(li, app);
-  appRowMeta(li, [["id", app.app], ["author", bytesToHex(app.authorPk).slice(0, 8)],
-    ["from", offer.fromPkHex.slice(0, 8)], ["bundle", app.hash.slice(0, 12)]]);
-  appRowClaims(li, app);
-  const btns = document.createElement("div");
-  btns.className = "app-row-buttons";
-  appRowButton(btns, "Install", "icon primary", () => acceptOffer(key));
-  appRowButton(btns, "Dismiss", "icon", () => dismissOffer(key));
-  li.appendChild(btns);
-  return li;
+  offersSection.hidden = pendingOffers.size === 0;
+  offerListEl.replaceChildren(...[...pendingOffers].map(([hash, offer]) => appRow(offer.peeked, {
+    className: "app-row offer-row",
+    from: offer.fromPkHex,
+    buttons: [["Install", "icon primary", () => acceptOffer(hash)], ["Dismiss", "icon", () => dismissOffer(hash)]],
+  })));
 }
 
 // ── drag-drop + file picker plumbing ───────────────────────────────────
@@ -1289,9 +1147,10 @@ window.addEventListener("message", (ev) => {
   // its guest something and wait, and one whose guest threw is not left waiting.
   if (msg.type === "call") {
     if (!(msg.bytes instanceof Uint8Array) || !Number.isSafeInteger(msg.id)) return;
-    // To the view that asked, if it is still there: the app may be gone by the answer.
-    const answer = (fields) => rec.frame?.contentWindow.postMessage({ type: "answer", id: msg.id, ...fields }, "*");
-    invokeApp(rec, APP_OP_UI, msg.bytes).then((payload) => answer({ payload }), (err) => {
+    // To the view that asked, if it is still there: the app may be gone by the answer. The
+    // answer is this call's alone, so its bytes are handed over rather than copied.
+    const answer = (fields, transfer = []) => rec.frame?.contentWindow.postMessage({ type: "answer", id: msg.id, ...fields }, "*", transfer);
+    invokeApp(rec, APP_OP_UI, msg.bytes).then((payload) => answer({ payload }, ownsBuffer(payload) ? [payload.buffer] : []), (err) => {
       shellPrint(`${rec.name}: ${err.message}`, "err");
       answer({ error: err.message });
     });
@@ -1314,202 +1173,82 @@ window.addEventListener("message", (ev) => {
   // key could have this node link to one its user never met, and its guest then write to
   // it. A key from anywhere else is added by the user, on the Network tab.
   if (msg.type === "contact") {
-    if (!isHex32(msg.peer) || contacts.has(msg.peer) || msg.peer === myPkHex) return;
-    if (!linkedNow.includes(msg.peer) && roomsOf(msg.peer).length === 0) {
-      // Said once for a key asked again and again, as chat asks ahead of every direct message.
-      if (rec.refusedContact !== msg.peer) {
-        shellPrint(`${rec.name} asked to make ${msg.peer.slice(0, 8)} a contact, which is not a peer this node ` +
-          "shares a room with or is linked to. Add it on the Network tab to link to it.", "err");
-      }
-      rec.refusedContact = msg.peer;
+    if (!isHex32(msg.peer) || peers.contacts.has(msg.peer) || msg.peer === myPkHex) return;
+    if (!peers.linked.has(msg.peer) && peers.roomsOf(msg.peer).length === 0) {
+      shellPrint(`${rec.name} asked to make ${msg.peer.slice(0, 8)} a contact, which is not a peer this node ` +
+        "shares a room with or is linked to. Add it on the Network tab to link to it.", "err");
       return;
     }
     addContact(msg.peer, null);
   }
 });
 
+/** Whether `bytes` is the whole of its buffer, so handing the buffer over hands nothing else. */
+const ownsBuffer = (bytes) => bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+
 // ---------------------------------------------------------------------------
 // Networking: the page meets peers in a relay room; the transport bundle links to them
 // through the relay and moves each link to WebRTC.
 //
-// The transport is the seedkernel-shipped signed bundle bootShell loaded: the channel
-// AKE, record layer, link routing and request/response layer run as its confined
-// guest program, driven by the shell's TransportHost, and so do the relay registration,
-// the links through the relay, the move to WebRTC (signaled over the peer's authenticated
+// The transport is the seedkernel-shipped signed bundle the assembly installed: the channel
+// AKE, record layer, link routing and request/response layer run as its confined guest
+// program, driven by the shell's TransportHost, and so do the relay registration, the
+// links through the relay, the move to WebRTC (signaled over the peer's authenticated
 // link) and who offers; a WebRTC link that is lost is dialed again through the relay
-// (§12.7). What net-rtc.ts contributes is the platform
-// object: it holds each RTCPeerConnection and passes its negotiation through as bytes.
-// Channel identity is the transport's in-channel HELLO/AUTH (§12.6),
-// so a frame reaches a guest already attributed to an authenticated peer:
-// the key the host puts in front of it is its author. No per-message signature.
+// (§12.7). What net-rtc.ts contributes is the platform object: it holds each
+// RTCPeerConnection and passes its negotiation through as bytes. Channel identity is the
+// transport's in-channel HELLO/AUTH (§12.6), so a frame reaches a guest already attributed
+// to an authenticated peer: the key the host puts in front of it is its author. No
+// per-message signature.
+//
+// Who is wanted, and the links to them, are peers.js's. What is the page's alone is below:
+// what it draws, what it keeps for a reload, and what it tells a peer's page of being its
+// peer. `relaySecret` is a private relay's (seedrelay's `--secret`), or null for an open
+// one: the relay operator's credential, so it never rides in a link that is shared.
 // ---------------------------------------------------------------------------
 
 // A nick is the shell's, not an app's: what this node calls itself, set on the Network
 // tab, and what each peer calls itself. The pages tell each other on their own channel
 // (`{ nick }` on shell/v1, `onPageNotice`), so a name is the same in every app and needs
-// none installed, and every app reads it out of its context (`contextNow`).
+// none installed, and every app reads it out of its context.
 
-/** The linked peers whose page has heard this node's nick. It holds no opinion about
- *  peers: it is only ever narrowed to an answer the transport gave, so a peer that dropped
- *  and came back (a reloaded tab keeps its key and forgets what it was told) is absent,
- *  and is told again. */
-const nickTold = new Set();
-
-/** Give each linked peer that has not heard it this node's nick, an empty one for none. A
- *  peer counts as told before the send, so nothing tells it twice, and no longer if its
- *  page did not get it. Run each time the links change (`followPeers`), so a peer that
- *  links is told as it does. */
-function tellNick(peers) {
-  for (const id of [...nickTold]) if (!peers.includes(id)) nickTold.delete(id);
-  const notice = new TextEncoder().encode(JSON.stringify({ nick: myNick }));
-  for (const peerId of peers) {
-    if (nickTold.has(peerId)) continue;
-    nickTold.add(peerId);
-    void tellPage(peerId, notice).catch(() => false).then((told) => { if (!told) nickTold.delete(peerId); });
-  }
-}
-
-/** Set this node's nick, or with "" have none. Every peer's copy is stale, so nobody
- *  counts as told any more, and the apps hear of it in their context. */
+/** Set this node's nick, or with "" have none. Every peer is told again, and the apps hear
+ *  of it in their context. */
 function setMyNick(nick) {
-  myNick = nick.trim().slice(0, MAX_NICK);
-  if (myNick) sessionStorage.setItem("shell.nick", myNick);
+  peers.setNick(nick);
+  if (peers.nick) sessionStorage.setItem("shell.nick", peers.nick);
   else sessionStorage.removeItem("shell.nick");
-  nickInput.value = myNick;
-  nickTold.clear();
-  tellNick(linkedNow);
+  nickInput.value = peers.nick;
   postContext();
-  shellPrint(myNick ? `You are now known as ${myNick}.` : "You no longer have a nick.", "sys");
+  shellPrint(peers.nick ? `You are now known as ${peers.nick}.` : "You no longer have a nick.", "sys");
 }
-nickInput.value = myNick;
+nickInput.value = peers.nick;
 nickSetBtn.addEventListener("click", () => setMyNick(nickInput.value));
-nickInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); setMyNick(nickInput.value); }
-});
-
-// Nothing here reloads the transport bundle or replaces its sockets: the page says who it
-// wants linked, and the transport links them, a peer at a time (`syncPeers`).
-//
-// `relaySecret` is a private relay's (seedrelay's `--secret`), or null for an open one. It
-// is the relay operator's credential, so it never rides in a link that is shared.
-// The room client and the transport each prove it with BLAKE2b, and never send it.
-
-/** One op of the transport's. The page has nothing to do about one it refuses. */
-function netOp(op) {
-  const answer = shell.call(NET_PROTO, op.build());
-  return answer ? answer.catch(() => {}) : Promise.resolve();
-}
-
-/** A room's name as people say it: without the random suffix "Random" gives one. */
-function friendlyRoom(name) {
-  return name.replace(/-[0-9a-f]{32}$/, "") || name;
-}
-
-/** Who the relay says is in the joined room with this id; nobody for a room not joined. */
-function membersOfRoom(id) {
-  for (const r of joinedRooms.values()) if (r.id === id) return r.members;
-  return new Set();
-}
-
-/** The names of the joined rooms `key` is in. */
-function roomsOf(key) {
-  return [...joinedRooms].filter(([, r]) => r.members.has(key)).map(([name]) => name);
-}
-
-/** The joined rooms changed: keep them, show them, and bring the links in step. */
-function roomsChanged() {
-  sessionStorage.setItem("shell.rooms", JSON.stringify([...joinedRooms.keys()]));
-  renderRoomList();
-  syncPeers();
-}
-
-/** Be on the relay at `origin`: the room client in every joined room, and the transport
- *  registered there, so this node's key can be called. Over once the transport is
- *  registered, or once that attempt has failed. */
-async function joinRelay(origin, relaySecret) {
-  const fresh = relay?.origin !== origin || relay.relaySecret !== relaySecret;
-  if (fresh) {
-    // The old relay's rooms are left, and their members heard leaving.
-    relay?.client.close();
-    const client = roomClient({
-      relay: origin,
-      publicKey: myKeys.publicKey,
-      sign: (m) => sodium.crypto_sign_detached(m, myKeys.privateKey),
-      ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
-      onMember: onRoomMember,
-      onRefused: (name) => {
-        shellPrint(`Room ${friendlyRoom(name)} is full; try again later.`, "err");
-        joinedRooms.delete(name);
-        roomsChanged();
-      },
-    });
-    relay = { origin, relaySecret, client };
-    showRelayButton();
-    // Contacts are called through this relay now: each is given its address there before
-    // the transport says it is registered, which is when they are called (`followPeers`).
-    syncPeers();
-  }
-  const { client } = relay;
-  const op = new OpArgs("relay").text(origin);
-  if (relaySecret) op.text(relaySecret);
-  const answer = shell.call(NET_PROTO, op.build());
-  if (!answer) throw new Error(`nothing claims ${NET_PROTO}`);
-  await answer;
-  // The rooms are joined once the transport is registered: a room tells its members of this
-  // node, and one of them calls it as soon as it hears.
-  if (fresh && relay?.client === client) {
-    for (const name of joinedRooms.keys()) await client.join(name);
-  }
-}
-
-/** Join the room `name`, beside any this page is already in. */
-async function joinRoom(name) {
-  if (joinedRooms.has(name)) return;
-  joinedRooms.set(name, { id: await roomId(name), members: new Set() });
-  roomsChanged();
-  await relay?.client.join(name);
-}
-
-/** Leave one room, and hang up on everyone it was the only reason to be linked to. */
-async function leaveRoom(name) {
-  if (!joinedRooms.has(name)) return;
-  const before = [...wanted.keys()];
-  await relay?.client.leave(name);
-  joinedRooms.delete(name);
-  roomsChanged();
-  hangUpUnwanted(before);
-}
-
-/** What a peer is shown as: the nick it told this page, or the start of its key. */
-function peerLabel(key) {
-  return peerNicks.get(key) ?? key.slice(0, 8);
-}
+onEnter(nickInput, () => setMyNick(nickInput.value));
 
 /** Make `key` a contact, with its contact secret or null: linked whether or not a room is
  *  shared. A new one is told, once it is linked, so it is this node's peer at both ends;
  *  `tell: false` is for one that said so itself. */
 function addContact(key, secret, { tell = true } = {}) {
   if (key === myPkHex) return;
-  if (!contacts.has(key)) {
+  if (!peers.contacts.has(key)) {
     if (tell) untoldPeers.set(key, true); else untoldPeers.delete(key);
   }
-  contacts.set(key, secret);
+  peers.addContact(key, secret);
   saveContacts();
   renderRoomList();
-  syncPeers();
 }
 
 /** Stop `key` being a contact, and tell it, unless it said so itself. */
 function removeContact(key, { tell = true } = {}) {
-  const before = [...wanted.keys()];
+  const before = [...peers.wanted.keys()];
   // One never told it was added has nothing to hear.
   const knows = untoldPeers.get(key) !== true;
   untoldPeers.delete(key);
-  contacts.delete(key);
+  peers.removeContact(key);
   saveContacts();
   renderRoomList();
-  syncPeers();
-  if (!tell || !knows) { hangUpUnwanted(before); return; }
+  if (!tell || !knows) { peers.hangUpUnwanted(before); return; }
   void tellRemoved(key, before);
 }
 
@@ -1523,140 +1262,53 @@ const peerNotice = (added) => new TextEncoder().encode(JSON.stringify({ peer: ad
 async function tellRemoved(key, before) {
   let told = false;
   try {
-    if (linkedNow.includes(key)) told = await tellPage(key, peerNotice(false));
+    if (peers.linked.has(key)) told = await tellPage(key, peerNotice(false));
   } catch { /* not told: owed, below */ }
-  if (!told && !contacts.has(key)) untoldPeers.set(key, false);
-  hangUpUnwanted(before);
+  if (!told && !peers.contacts.has(key)) untoldPeers.set(key, false);
+  peers.hangUpUnwanted(before);
 }
 
 /** Send each linked peer the notice it is owed: that this node added it, or removed it. */
-function tellPeers(linked) {
+function tellPeers() {
   for (const [key, added] of [...untoldPeers]) {
-    if (!linked.includes(key)) continue;
+    if (!peers.linked.has(key)) continue;
     untoldPeers.delete(key);
     const told = tellPage(key, peerNotice(added)).catch(() => {});
     // A removed peer that linked again, still listing this node: it is told, and hung up on.
-    if (!added) void told.then(() => hangUpUnwanted([key]));
+    if (!added) void told.then(() => peers.hangUpUnwanted([key]));
   }
 }
 
-/** Close the links to those of `before` this page no longer wants. Only what the user did
- *  here hangs up, leaving a room or removing a contact: a peer merely heard leaving hangs
- *  up itself, and one whose relay dropped has not gone anywhere. */
-function hangUpUnwanted(before) {
-  for (const key of before) {
-    if (!wanted.has(key)) void netOp(new OpArgs("forget").blob(hexToBytes(key)));
-  }
+/** A contact row's Connect, and a contact given again: call `key` afresh, presenting
+ *  `secret`, or none. */
+function recontact(key, secret) {
+  peers.callAfresh(key);
+  addContact(key, secret);
 }
 
-// A key the room client heard join or leave a room. One that joins is waited for afresh.
-function onRoomMember(room, key, present) {
-  const r = joinedRooms.get(room);
-  if (!r || key === myPkHex) return;
-  if (present) { r.members.add(key); wanted.delete(key); }
-  else r.members.delete(key);
-  renderRoomList();
-  syncPeers();
-}
-
-/** Bring the transport in step with who this page wants linked: its room-mates and its
- *  contacts. Room-mates are welcomed, so their calls need no contact secret, and every
- *  wanted peer gets its address. */
-function syncPeers() {
-  const mates = new Set();
-  for (const r of joinedRooms.values()) for (const key of r.members) mates.add(key);
-  void netOp(new OpArgs("welcome").blob(hexToBytes([...mates].join(""))));
-  const want = new Set([...mates, ...contacts.keys()]);
-  for (const key of [...wanted.keys()]) {
-    if (want.has(key)) continue;
-    wanted.delete(key);
-    // No longer wanted, so no longer called: the transport is taught it has no destination.
-    teachPeer(key);
-  }
-  for (const key of want) {
-    if (!wanted.has(key)) wanted.set(key, { silent: false, calling: false });
-    teachPeer(key);
-  }
-  followPeers();
-}
-
-/** Call `key`, a wanted peer this node has no link to, a contact or a room-mate: tell its
- *  page nothing, which has the transport dial it and says whether anyone answered
- *  (`tellPage`). Two that call each other end up on one link, since the transport keeps the
- *  smaller key's of a double connect (seedkernel §12.6).
- *
- *  A peer that gives no answer, and has not linked by calling this node either, reads as
- *  `silent` and is left alone until its row's Connect, or until it calls or joins a room
- *  again. One that is not on the relay is known at once. One that ignores the call, as a
- *  node whose contact secret was not presented does, is known when the shell app's wait for
- *  an answer runs out, which is the time the host gives any guest (seedkernel §12.3). */
-async function callPeer(key, w) {
-  w.calling = true;
-  const answered = await tellPage(key, new Uint8Array(0)).catch(() => false);
-  w.calling = false;
-  if (answered || linkedNow.includes(key)) return;
-  w.silent = true;
-  renderPeerList(routesNow);
-}
-
-/** Have `key` called afresh, as its row's Connect and a contact given again do. A call to
- *  it still under way presents what was known of it before, so the transport drops it with
- *  the peer's address, and the next sync gives the peer one and calls it. Not for a linked
- *  peer, whose link a forget would close. */
-function callAfresh(key) {
-  if (!linkedNow.includes(key)) void netOp(new OpArgs("forget").blob(hexToBytes(key)));
-  wanted.delete(key);
-}
-
-/** What a call presents to a node with no contact secret, or to a room-mate, which
- *  welcomes this node: 32 zero bytes. Not an empty blob, which the transport reads as
- *  "present this node's own". */
-const NO_SECRET = new Uint8Array(32);
-
-/** Give the transport its address for `key`: the contact secret to present, and the relay
- *  to call it through. A key this node does not want linked has no destination, and none
- *  has one while this page is on no relay: the transport dials only what has one. */
-function teachPeer(key) {
-  const secret = roomsOf(key).length > 0 ? NO_SECRET : contacts.get(key) ?? NO_SECRET;
-  void netOp(new OpArgs("addr").blob(hexToBytes(key)).blob(secret)
-    .text(relay && wanted.has(key) ? `relay+${relay.origin}` : ""));
-}
-
-/** A contact row's Connect: call `key` again, presenting what its field holds as the
- *  contact secret, or none for an empty one. */
+/** A contact row's Connect: what its field holds is the contact secret to present. */
 function connectPeer(key, field) {
-  const typed = field.value.trim().toLowerCase();
-  if (typed !== "" && !HEX32_RE.test(typed)) {
-    field.setCustomValidity("A contact secret is 64 hex characters.");
-    field.reportValidity();
-    return;
-  }
-  callAfresh(key);
-  addContact(key, typed === "" ? null : hexToBytes(typed));
+  const secret = readHex32(field, "A contact secret is 64 hex characters.");
+  if (secret !== undefined) recontact(key, secret);
 }
 
-/** Set this node's own contact secret, or with null open it to any caller. Links already
- *  up stay, and room-mates are answered either way. */
+/** Set this node's own contact secret, or with null open it to any caller (§12.6.3). Links
+ *  already up stay, and room-mates are answered either way. */
 async function setMyContact(secret) {
-  await setTransportContact(secret);
+  await peers.net(new OpArgs("contact").blob(secret ?? new Uint8Array(0)));
   myContactSecret = secret;
-  if (secret) sessionStorage.setItem("shell.contactSecret", bytesToHex(secret));
+  if (secret) sessionStorage.setItem("shell.contactSecret", toHex(secret));
   else sessionStorage.removeItem("shell.contactSecret");
   updateContactHint();
 }
 
-// Boot the app registry now that the shell exists: render the (empty) lists, then
-// pull back anything installed earlier this session so a transitive Offer works the
-// moment peers connect, from the saved signed bytes — and separately, replay whatever
-// the offers app's own fs already holds (restoreOffers, "peer-to-peer app offers"
-// above), since that record is the offer list's source of truth, not this session's
-// installedApps.
+// Boot the app registry now that the shell exists: render the (empty) lists, then pull
+// back anything installed earlier this session so a transitive Offer works the moment
+// peers connect, from the saved signed bytes.
 renderAppList();
 renderOfferList();
 restoreInstalledApps().catch((err) =>
   shellPrint(`Restore failed: ${err.message}`, "err"));
-restoreOffers().catch((err) =>
-  shellPrint(`Could not replay stored offers: ${err.message}`, "err"));
 
 // ─── live audio/video calls ────────────────────────────────────────────
 //
@@ -1693,13 +1345,19 @@ const remoteTiles = new Map(); // pkHex -> { wrap, video, stream }
 // and undefined for an app that never says, or with no app shown.
 let callScope;
 
+/** The linked peers, by key in hex. */
+const linkedKeys = () => [...peers.linked.keys()];
+
+/** Who the relay says is in the joined room with this id; nobody for a room not joined. */
+const membersOf = (id) => peers.roomById(id)?.[1].members ?? new Set();
+
 /** Who of the linked peers a call with `scope` is with: a room's members, or one peer. A
  *  call from an app that never says which conversation is open is with everyone linked. */
 function peersIn(scope, linked) {
   if (scope === undefined) return linked;
   if (scope === null) return [];
   if (scope.to) return linked.filter((p) => p === scope.to);
-  const members = membersOfRoom(scope.room);
+  const members = membersOf(scope.room);
   return linked.filter((p) => members.has(p));
 }
 
@@ -1710,13 +1368,13 @@ const callPeers = (linked) => peersIn(callScope, linked);
  *  the view's word (`conv`), and it is the user's camera and microphone that go there: so
  *  the call bar says who that is, and the user need not take it from the view as well. */
 function callTarget(scope) {
-  const n = peersIn(scope, linkedNow).length;
+  const n = peersIn(scope, linkedKeys()).length;
   if (scope === undefined) {
     return n === 0 ? "nobody, since no peer is linked" : n === 1 ? "the 1 linked peer" : `all ${n} linked peers`;
   }
   if (scope === null) return "nobody, since no conversation is open in the app";
-  if (scope.to) return n > 0 ? peerLabel(scope.to) : `${peerLabel(scope.to)}, who is not linked`;
-  const room = [...joinedRooms].find(([, r]) => r.id === scope.room)?.[0];
+  if (scope.to) return n > 0 ? peers.label(scope.to) : `${peers.label(scope.to)}, who is not linked`;
+  const [room] = peers.roomById(scope.room) ?? [];
   if (!room) return "nobody, since this node is not in that room";
   return n === 0 ? `nobody, since no one in ${friendlyRoom(room)} is linked` : `the ${n} linked in ${friendlyRoom(room)}`;
 }
@@ -1739,7 +1397,7 @@ function incomingCall() {
   const callers = media.callers;
   for (const [from, call] of callers) {
     const direct = call === "direct";
-    if (!direct && call !== "all" && !membersOfRoom(call).has(from)) continue;
+    if (!direct && call !== "all" && !membersOf(call).has(from)) continue;
     if (declined.has(callId(from, call))) continue;
     return {
       id: callId(from, call),
@@ -1766,8 +1424,8 @@ function updateCallStatus() {
   callBar.classList.toggle("idle", !localStream);
   if (ring) {
     const [first, ...more] = ring.callers;
-    const room = [...joinedRooms].find(([, r]) => r.id === ring.scope?.room)?.[0];
-    callStatus.textContent = `${peerLabel(first)}${more.length > 0 ? ` and ${more.length} more are` : " is"} calling` +
+    const [room] = (ring.scope?.room && peers.roomById(ring.scope.room)) || [];
+    callStatus.textContent = `${peers.label(first)}${more.length > 0 ? ` and ${more.length} more are` : " is"} calling` +
       (room ? ` in ${friendlyRoom(room)}` : "");
   } else if (!localStream) {
     // Who a call started now would ring, beside the button that starts it.
@@ -1781,8 +1439,7 @@ function updateCallStatus() {
 }
 
 function showTilesIfAny() {
-  const has = !!localStream || remoteTiles.size > 0;
-  videoTiles.classList.toggle("hidden", !has);
+  videoTiles.classList.toggle("hidden", !localTile && remoteTiles.size === 0);
 }
 
 /** Draw a tile as its video, or as its label alone while it has none to show: no camera,
@@ -1792,51 +1449,48 @@ function drawTile(wrap, stream) {
   wrap.classList.toggle("no-video", !video);
 }
 
-function ensureLocalTile() {
-  if (document.getElementById("tile-local")) return;
+/** A tile: `stream` as a video, with `label` under it. Our own plays muted. */
+function makeTile(label, stream, own) {
   const wrap = document.createElement("div");
-  wrap.className = "tile local";
-  wrap.id = "tile-local";
-  const v = document.createElement("video");
-  v.autoplay = true;
-  v.muted = true;
-  v.playsInline = true;
-  v.srcObject = localStream;
+  wrap.className = own ? "tile local" : "tile";
+  if (own) wrap.id = "tile-local";
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.muted = own;
+  video.playsInline = true;
+  video.srcObject = stream;
   const lab = document.createElement("div");
   lab.className = "tile-label";
-  lab.textContent = `me · ${myPkHex.slice(0, 8)}`;
-  wrap.appendChild(v);
-  wrap.appendChild(lab);
+  lab.textContent = label;
+  wrap.append(video, lab);
   videoTiles.appendChild(wrap);
+  return { wrap, video, stream };
+}
+
+// Our own tile while in a call, and each peer's.
+let localTile = null;
+
+function removeTile(tile) {
+  tile.video.srcObject = null;
+  tile.wrap.remove();
+}
+
+function ensureLocalTile() {
+  localTile ??= makeTile(`me · ${myPkHex.slice(0, 8)}`, localStream, true);
   showTilesIfAny();
 }
 
 function removeLocalTile() {
-  const t = document.getElementById("tile-local");
-  if (!t) return;
-  const v = t.querySelector("video");
-  if (v) v.srcObject = null;
-  t.remove();
+  if (!localTile) return;
+  removeTile(localTile);
+  localTile = null;
   showTilesIfAny();
 }
 
 function getOrCreateRemoteTile(pkHex) {
   let t = remoteTiles.get(pkHex);
   if (t) return t;
-  const wrap = document.createElement("div");
-  wrap.className = "tile";
-  const v = document.createElement("video");
-  v.autoplay = true;
-  v.playsInline = true;
-  const stream = new MediaStream();
-  v.srcObject = stream;
-  const lab = document.createElement("div");
-  lab.className = "tile-label";
-  lab.textContent = pkHex.slice(0, 8);
-  wrap.appendChild(v);
-  wrap.appendChild(lab);
-  videoTiles.appendChild(wrap);
-  t = { wrap, video: v, stream };
+  t = makeTile(pkHex.slice(0, 8), new MediaStream(), false);
   remoteTiles.set(pkHex, t);
   showTilesIfAny();
   updateCallStatus();
@@ -1846,11 +1500,7 @@ function getOrCreateRemoteTile(pkHex) {
 function removeRemoteTile(pkHex) {
   const t = remoteTiles.get(pkHex);
   if (!t) return;
-  for (const track of t.stream.getTracks()) {
-    try { t.stream.removeTrack(track); } catch {}
-  }
-  t.video.srcObject = null;
-  t.wrap.remove();
+  removeTile(t);
   remoteTiles.delete(pkHex);
   showTilesIfAny();
   updateCallStatus();
@@ -1865,7 +1515,7 @@ function startCall() {
   const ring = incomingCall();
   localStream = new MediaStream();
   callScope = ring ? ring.scope : installedApps.get(activeAppKey)?.conv;
-  media.start(callName(callScope), callPeers, linkedNow);
+  media.start(callName(callScope), callPeers, linkedKeys());
   callStartBtn.disabled = true;
   callEndBtn.disabled = false;
   ensureLocalTile();
@@ -1908,8 +1558,7 @@ function showCapture() {
   const [cam] = localStream?.getVideoTracks() ?? [];
   callMuteBtn.textContent = mic?.enabled ? "Mute" : "Unmute";
   callCamBtn.textContent = cam ? "Stop video" : "Start video";
-  const tile = document.getElementById("tile-local");
-  if (tile) drawTile(tile, localStream);
+  if (localTile) drawTile(localTile.wrap, localStream);
 }
 
 /** Turn on the microphone (`audio`), the camera (`video`), or both in one asking: ask the
@@ -1987,9 +1636,6 @@ if (navigator.connection && typeof navigator.connection.addEventListener === "fu
   });
 }
 
-// Room names stay URL-safe identifier characters, length 1..128, so they read cleanly in
-// the relay URL and room links; the relay itself sees only a hash of the name.
-const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 // The room joined when none is named: where two tabs on a laptop meet.
 const DEFAULT_ROOM = "global";
 
@@ -2002,8 +1648,9 @@ function parseRelay(base) {
   return { origin: `${u.protocol}//${u.host}`, room: decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, "")) };
 }
 
-// The relay as last joined, for the status line and a reload: { base, url, relaySecret,
-// joining }.
+// The Connect under way or last made: the URL as it was typed, which a reload connects to
+// again, and whether it is still under way. null after a Disconnect. Which relay and secret
+// it is on are peers.js's (`peers.relay`).
 let relayJoin = null;
 
 /** Whether `room` is a name a room can have, saying so when it is not. */
@@ -2023,15 +1670,16 @@ async function connectRelay() {
   if (!target) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
   if (target.room && !roomNameOk(target.room)) return;
   const relaySecret = relaySecretInput.value.trim() || null;
-  const join = relayJoin = { base, url: target.origin, relaySecret, joining: true };
+  const join = relayJoin = { base, joining: true };
   try {
-    RTC_CONFIG.iceServers = [{ urls: `stun:${new URL(base).hostname}:${RELAY_STUN_PORT}` }];
     relayShown = -1;
     relayStatus.textContent = "connecting...";
     setRelayPill("connecting", "connecting");
     shellPrint(`Connecting to ${target.origin}...`, "sys");
-    if (target.room) await joinRoom(target.room);
-    await joinRelay(target.origin, relaySecret);
+    if (target.room) await peers.joinRoom(target.room);
+    const joined = peers.joinRelay(target.origin, relaySecret);
+    showRelayButton();
+    await joined;
     if (relayJoin !== join) return; // disconnected meanwhile, or connecting elsewhere
     join.joining = false;
     showRelay();
@@ -2045,73 +1693,64 @@ async function connectRelay() {
   }
 }
 
-/** "Disconnect": be on no relay. The rooms keep their names for the next Connect, with
- *  nobody heard in them, so the links they were the reason for are closed; a contact
- *  already linked stays linked. */
+/** "Disconnect": be on no relay (peers.js `leaveRelay`). The rooms keep their names for the
+ *  next Connect. */
 async function disconnectRelay() {
-  if (!relay) return;
-  const before = [...wanted.keys()];
-  const { client } = relay;
-  relay = null;
+  if (!peers.relay) return;
   relayJoin = null;
   relayShown = 0;
+  const left = peers.leaveRelay();
   showRelayButton();
-  // The room client hears every member leave as it closes (`onRoomMember`), and with no
-  // relay a contact has no address to be called at.
-  client.close();
-  syncPeers();
-  hangUpUnwanted(before);
   // A reload stays off the relay too.
   sessionStorage.removeItem("shell.relayUrl");
   sessionStorage.removeItem("shell.relaySecret");
-  await netOp(new OpArgs("relay").text(""));
+  await left;
   showRelayState(0);
   shellPrint("Disconnected from the relay.", "sys");
 }
 
 /** The relay button is the way out while this page is on a relay, or trying to be. */
 function showRelayButton() {
-  relayConnectBtn.textContent = relay ? "Disconnect" : "Connect";
-  relayConnectBtn.classList.toggle("primary", !relay);
+  relayConnectBtn.textContent = peers.relay ? "Disconnect" : "Connect";
+  relayConnectBtn.classList.toggle("primary", !peers.relay);
 }
 
 // The relay link is the transport's, which tells its state each time it changes
 // (`onStatus`): 0 none joined, 1 registered, 2 dropped and redialing (seedkernel §12.6). It
 // is shown only when it is not what is shown already, and not while a join is under way:
-// that shows as connecting until it is over, registered or failed.
-let relayNow = 0;
+// that shows as connecting until it is over, registered or failed. A Connect shows the
+// state it ends in whatever was shown before it (-1), and a Disconnect has shown none (0).
 let relayShown = -1;
 function showRelay() {
-  if (relayNow === relayShown || relayJoin?.joining) return;
-  relayShown = relayNow;
-  showRelayState(relayNow);
+  if (peers.relayState === relayShown || relayJoin?.joining) return;
+  relayShown = peers.relayState;
+  showRelayState(peers.relayState);
 }
 
 /** The joined rooms in a few words, for the pill and the status line. */
 function roomsLabel() {
-  const names = [...joinedRooms.keys()].map(friendlyRoom);
+  const names = [...peers.rooms.keys()].map(friendlyRoom);
   return names.length === 0 ? "no room" : names.length === 1 ? `room ${names[0]}` : `${names.length} rooms`;
 }
 
 /** Show the relay as connected: the pill names the rooms, or just says so with none. */
 function showConnected() {
   relayStatus.textContent = `connected · ${roomsLabel()}`;
-  setRelayPill("ok", joinedRooms.size === 0 ? "connected" : roomsLabel());
+  setRelayPill("ok", peers.rooms.size === 0 ? "connected" : roomsLabel());
 }
 
 function showRelayState(state) {
-  const current = relayJoin;
-  if (!current || state === 0) {
+  if (!relayJoin || !peers.relay || state === 0) {
     relayStatus.textContent = "disconnected";
     setRelayPill("off", "no relay");
     return;
   }
-  const { base, url, relaySecret } = current;
+  const { origin, relaySecret } = peers.relay;
   if (state === 1) {
     shellPrint(`Relay link up — ${roomsLabel()}.`, "sys");
     showConnected();
     // Remember the relay so a reload picks it, and the rooms, back up automatically.
-    sessionStorage.setItem("shell.relayUrl", base);
+    sessionStorage.setItem("shell.relayUrl", relayJoin.base);
     // The relay secret belongs to the relay, so it is saved and cleared with the relay.
     if (relaySecret) sessionStorage.setItem("shell.relaySecret", relaySecret);
     else sessionStorage.removeItem("shell.relaySecret");
@@ -2119,7 +1758,7 @@ function showRelayState(state) {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
     // A private relay drops a node without its secret, which reads here as unreachable.
-    shellPrint(`Relay unreachable — is one running at ${url}, and if it is private, is the relay secret right? ` +
+    shellPrint(`Relay unreachable — is one running at ${origin}, and if it is private, is the relay secret right? ` +
       "Retrying; existing P2P links are unaffected.", "err");
   }
 }
@@ -2131,36 +1770,28 @@ async function joinTypedRoom() {
   if (!roomNameOk(room)) return;
   try {
     shellPrint(`Joining room ${friendlyRoom(room)}...`, "sys");
-    await joinRoom(room);
+    await peers.joinRoom(room);
     relayRoomInput.value = "";
   }
   catch (err) {
     shellPrint(`Could not join room ${friendlyRoom(room)}: ${err?.message ?? err}`, "err");
     return;
   }
-  if (!relay) await connectRelay();
+  if (!peers.relay) await connectRelay();
 }
 
 showRelay();
-relayConnectBtn.addEventListener("click", () => (relay ? disconnectRelay() : connectRelay()));
+relayConnectBtn.addEventListener("click", () => (peers.relay ? disconnectRelay() : connectRelay()));
 roomJoinBtn.addEventListener("click", joinTypedRoom);
-for (const [field, act] of [[relayUrlInput, connectRelay], [relaySecretInput, connectRelay], [relayRoomInput, joinTypedRoom]]) {
-  field.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); act(); }
-  });
-}
+onEnter(relayUrlInput, connectRelay);
+onEnter(relaySecretInput, connectRelay);
+onEnter(relayRoomInput, joinTypedRoom);
 
 // The Network tab's room list: each joined room with who else is in it, a link to share it
 // by, and the way out of it.
 function renderRoomList() {
-  roomListEl.replaceChildren();
-  if (joinedRooms.size === 0) {
-    const li = document.createElement("li");
-    li.className = "empty-row";
-    li.textContent = "No room joined.";
-    roomListEl.appendChild(li);
-  }
-  for (const [name, r] of joinedRooms) {
+  if (peers.rooms.size === 0) roomListEl.replaceChildren(emptyRow("No room joined."));
+  else roomListEl.replaceChildren(...[...peers.rooms].map(([name, r]) => {
     const li = document.createElement("li");
     li.className = "peer-row room-row";
     const label = document.createElement("span");
@@ -2171,17 +1802,9 @@ function renderRoomList() {
     count.className = "peer-row-where";
     count.textContent = r.members.size === 0 ? "no other peers"
       : r.members.size === 1 ? "1 other peer" : `${r.members.size} other peers`;
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "icon";
-    copy.textContent = "Copy link";
-    copy.addEventListener("click", () => void copyOrPrint(roomLink(name),
+    const copy = iconButton("Copy link", () => void copyOrPrint(roomLink(name),
       `Link to room ${friendlyRoom(name)} copied. Anyone with it can join.`, "link"));
-    const leave = document.createElement("button");
-    leave.type = "button";
-    leave.className = "icon";
-    leave.textContent = "Leave";
-    leave.addEventListener("click", () => void leaveRoom(name));
+    const leave = iconButton("Leave", () => void peers.leaveRoom(name));
     li.append(label, count, copy, leave);
     // Who they are, a line each under the room. One that is not a contact yet is made one
     // from here, and is then in the peer list.
@@ -2193,25 +1816,20 @@ function renderRoomList() {
         member.className = "room-member";
         const id = document.createElement("span");
         id.className = "peer-row-id";
-        id.textContent = peerLabel(key);
+        id.textContent = peers.label(key);
         id.title = key;
         member.appendChild(id);
-        if (!contacts.has(key)) {
-          const add = document.createElement("button");
-          add.type = "button";
-          add.className = "icon";
-          add.textContent = "Add peer";
-          add.title = "Make this peer a contact: stay linked whether or not you share a room.";
-          add.addEventListener("click", () => addContact(key, null));
-          member.appendChild(add);
+        if (!peers.contacts.has(key)) {
+          member.appendChild(iconButton("Add peer", () => addContact(key, null),
+            "Make this peer a contact: stay linked whether or not you share a room."));
         }
         members.appendChild(member);
       }
       li.appendChild(members);
     }
-    roomListEl.appendChild(li);
-  }
-  if (relay && relayShown === 1) showConnected();
+    return li;
+  }));
+  if (peers.relay && relayShown === 1) showConnected();
 }
 
 // ── Links: a room to meet in, a contact to reach ─────────────────────────────
@@ -2230,7 +1848,7 @@ function parseLink(text) {
   const pk = (q.get("pk") ?? "").toLowerCase(), s = (q.get("s") ?? "").toLowerCase();
   return {
     room: ROOM_NAME_RE.test(room) ? room : undefined,
-    contact: HEX32_RE.test(pk) ? { key: pk, secret: HEX32_RE.test(s) ? hexToBytes(s) : null } : undefined,
+    contact: HEX32_RE.test(pk) ? { key: pk, secret: HEX32_RE.test(s) ? fromHex(s) : null } : undefined,
   };
 }
 
@@ -2239,7 +1857,7 @@ const roomLink = (name) => `${pageUrl()}#${new URLSearchParams({ room: name })}`
 /** This node's contact link: its key, and its contact secret when it has one. */
 function contactLink() {
   const q = new URLSearchParams({ pk: myPkHex });
-  if (myContactSecret) q.set("s", bytesToHex(myContactSecret));
+  if (myContactSecret) q.set("s", toHex(myContactSecret));
   return `${pageUrl()}#${q}`;
 }
 
@@ -2258,10 +1876,8 @@ function updateContactHint() {
 // the room is shown. Lowercase hex so it round-trips through case-insensitive copy paths
 // (URLs, chat clients) unchanged.
 relayNewRoomBtn.addEventListener("click", () => {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
   const name = friendlyRoom(relayRoomInput.value.trim()).slice(0, 95) || "room";
-  relayRoomInput.value = `${name}-${bytesToHex(bytes)}`;
+  relayRoomInput.value = `${name}-${toHex(sodium.randombytes_buf(16))}`;
   shellPrint("Private room name minted — press Join, then share its link.", "sys");
   relayRoomInput.focus();
 });
@@ -2280,24 +1896,15 @@ async function copyOrPrint(text, copied, what) {
 
 /** Apply what the contact secret field holds: 64 hex characters, or nothing for none. */
 async function applyContactField() {
-  const typed = contactInput.value.trim().toLowerCase();
-  if (typed !== "" && !HEX32_RE.test(typed)) {
-    contactInput.setCustomValidity("A contact secret is 64 hex characters, or empty for none.");
-    contactInput.reportValidity();
-    return;
-  }
-  try { await setMyContact(typed === "" ? null : hexToBytes(typed)); }
+  const secret = readHex32(contactInput, "A contact secret is 64 hex characters, or empty for none.");
+  if (secret === undefined) return;
+  try { await setMyContact(secret); }
   catch (err) { shellPrint(`Could not set the contact secret: ${err.message}`, "err"); }
 }
-contactInput.addEventListener("input", () => contactInput.setCustomValidity(""));
-contactInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); void applyContactField(); }
-});
+hexField(contactInput, () => void applyContactField());
 contactSetBtn.addEventListener("click", () => void applyContactField());
 contactNewBtn.addEventListener("click", () => {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  contactInput.value = bytesToHex(bytes);
+  contactInput.value = toHex(sodium.randombytes_buf(32));
   void applyContactField();
 });
 contactCopyBtn.addEventListener("click", () => void copyOrPrint(contactLink(), myContactSecret
@@ -2310,23 +1917,18 @@ function addContactFromFields() {
   const typed = contactAddInput.value.trim();
   const linked = parseLink(typed).contact;
   const key = linked ? linked.key : typed.toLowerCase();
-  const secret = contactAddSecretInput.value.trim().toLowerCase();
-  const refuse = (field, why) => { field.setCustomValidity(why); field.reportValidity(); };
-  if (!HEX32_RE.test(key)) return refuse(contactAddInput, "A contact is a contact link, or a key of 64 hex characters.");
-  if (key === myPkHex) return refuse(contactAddInput, "That is this node's own key.");
-  if (secret !== "" && !HEX32_RE.test(secret)) return refuse(contactAddSecretInput, "A contact secret is 64 hex characters.");
-  callAfresh(key);
-  addContact(key, secret !== "" ? hexToBytes(secret) : linked?.secret ?? null);
+  const refuse = (why) => { contactAddInput.setCustomValidity(why); contactAddInput.reportValidity(); };
+  if (!HEX32_RE.test(key)) return refuse("A contact is a contact link, or a key of 64 hex characters.");
+  if (key === myPkHex) return refuse("That is this node's own key.");
+  const secret = readHex32(contactAddSecretInput, "A contact secret is 64 hex characters.");
+  if (secret === undefined) return;
+  recontact(key, secret ?? linked?.secret ?? null);
   contactAddInput.value = contactAddSecretInput.value = "";
   shellPrint(`Contact ${key.slice(0, 8)} added.`, "sys");
 }
 contactAddBtn.addEventListener("click", addContactFromFields);
-for (const field of [contactAddInput, contactAddSecretInput]) {
-  field.addEventListener("input", () => field.setCustomValidity(""));
-  field.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); addContactFromFields(); }
-  });
-}
+hexField(contactAddInput, addContactFromFields);
+hexField(contactAddSecretInput, addContactFromFields);
 
 // Default relay URL: same host the page is loaded from (so phones loading
 // the shell off a desktop's LAN IP get the right pre-fill out of the box).
@@ -2340,6 +1942,23 @@ function defaultRelayUrl() {
   return `ws://${host}:8080`;
 }
 
+// Authenticated peer truth stays in the transport guest, which tells the page who is linked
+// each time that changes (`onStatus`): the page draws and passes on what it was told, and
+// peers.js dials whoever it wants linked that is not. What it hears is also what the apps
+// are told is linked (`postContext`), with the rooms and the contacts: each app's guest is
+// told when any of them changes.
+//
+// Run when the links or the relay's state change, and when who this page wants linked does
+// (peers.js `follow`). Nothing here runs by the clock.
+function followPeers() {
+  tellPeers();
+  updatePeerPill();
+  renderPeerList();
+  postContext();
+  media.sync(linkedKeys());
+  updateCallStatus();
+}
+
 // Auto-reconnect to the last relay that successfully accepted us, in the rooms we were
 // in. This is the other half of the reload story: rejoining a room announces our key to
 // its members, and the transport links each of them with our new tab.
@@ -2347,7 +1966,7 @@ const savedRelayUrl = sessionStorage.getItem("shell.relayUrl");
 const savedRelaySecret = sessionStorage.getItem("shell.relaySecret");
 relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
 if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
-if (myContactSecret) contactInput.value = bytesToHex(myContactSecret);
+if (myContactSecret) contactInput.value = toHex(myContactSecret);
 let savedRooms = [];
 try { savedRooms = JSON.parse(sessionStorage.getItem("shell.rooms") ?? "[]"); } catch {}
 
@@ -2358,47 +1977,17 @@ if (followed.room) {
   savedRooms.push(followed.room);
   shellPrint(`Room link: ${friendlyRoom(followed.room)}.`, "sys");
 }
+if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+for (const name of savedRooms) {
+  if (typeof name === "string" && ROOM_NAME_RE.test(name) && !peers.rooms.has(name)) {
+    peers.rooms.set(name, { id: await roomId(name), members: new Set() });
+  }
+}
+updateContactHint();
+peers.roomsChanged();
 if (followed.contact && followed.contact.key !== myPkHex) {
-  if (!contacts.has(followed.contact.key)) untoldPeers.set(followed.contact.key, true);
-  contacts.set(followed.contact.key, followed.contact.secret);
-  saveContacts();
+  addContact(followed.contact.key, followed.contact.secret);
   shellPrint(`Contact link: ${followed.contact.key.slice(0, 8)}` +
     (followed.contact.secret ? ", with its contact secret." : "."), "sys");
 }
-if (location.hash) history.replaceState(null, "", location.pathname + location.search);
-for (const name of savedRooms) {
-  if (typeof name === "string" && ROOM_NAME_RE.test(name)) joinedRooms.set(name, { id: await roomId(name), members: new Set() });
-}
-updateContactHint();
-roomsChanged();
 if (savedRelayUrl) connectRelay();
-
-// Authenticated peer truth stays in the transport guest, which tells the page who is linked
-// each time that changes (`onStatus`): the page draws and passes on what it was told, and
-// calls whoever it wants linked that is not (`callPeer`).
-// What it hears is also what the apps are told is linked (`postContext`), with the rooms
-// and the contacts: each app's guest is told when any of them changes.
-//
-// Run when the links or the relay's state change, and when who this page wants linked does
-// (`syncPeers`). Nothing here runs by the clock.
-function followPeers() {
-  const routes = routesNow;
-  const peers = routes.map((r) => r.id);
-  // A wanted peer this node has no link to is called, one whose link dropped as much as one
-  // that never had one, while the transport is registered on the relay the call goes
-  // through. One that gave no answer is left alone (`callPeer`).
-  for (const [key, w] of wanted) {
-    if (peers.includes(key)) w.silent = false;
-    else if (relay && relayNow === 1 && !w.silent && !w.calling) void callPeer(key, w);
-  }
-  tellPeers(peers);
-  updatePeerPill(routes);
-  renderPeerList(routes);
-  linkedNow = peers;
-  tellNick(peers);
-  postContext();
-  media.sync(peers);
-  updateCallStatus();
-}
-followPeers();
-updateCallStatus();

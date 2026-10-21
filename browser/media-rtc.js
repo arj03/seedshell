@@ -22,8 +22,9 @@
 const encode = (msg) => new TextEncoder().encode(JSON.stringify(msg));
 
 export class MediaCalls {
-  /** peerId → { pc, polite, makingOffer, ignoreOffer, carrying }, `carrying` the
-   *  transceiver each of our tracks is sent on */
+  /** peerId → { pc, ready, polite, makingOffer, ignoreOffer, carrying }: `pc` is null until
+   *  the ICE servers toward the peer are known, which it is made with, and `ready` settles
+   *  then; `carrying` is the transceiver each of our tracks is sent on */
   #peers = new Map();
   /** Local tracks to publish, [{ track, stream }]; empty while nothing of ours is on. */
   #tracks = [];
@@ -33,13 +34,13 @@ export class MediaCalls {
   #among = null;
   /** The peers told we are in it. */
   #rung = new Set();
-  /** peerId → { call }: every peer that says it is in a call, and which. */
+  /** peerId → the call it says it is in, for every peer in one. */
   #callers = new Map();
 
   /**
    * @param {{
    *   myId: string,
-   *   rtcConfig?: RTCConfiguration,
+   *   iceServers: (peerId: string) => Promise<RTCIceServer[]>,
    *   send: (peerId: string, signal: Uint8Array) => Promise<unknown>,
    *   onTrack?: (peerId: string, track: MediaStreamTrack) => void,
    *   onPeerClosed?: (peerId: string) => void,
@@ -49,7 +50,7 @@ export class MediaCalls {
   constructor(opts) { this.opts = opts; }
 
   /** peerId → the call it says it is in, for every peer in one. */
-  get callers() { return new Map([...this.#callers].map(([p, c]) => [p, c.call])); }
+  get callers() { return new Map(this.#callers); }
 
   /** How many peers are in the call with us. */
   get size() { return this.#peers.size; }
@@ -122,7 +123,7 @@ export class MediaCalls {
   /** Kick an ICE restart on every call, after a network change. */
   restartAllIce() {
     for (const e of this.#peers.values()) {
-      try { e.pc.restartIce(); } catch { /* nothing to restart */ }
+      try { e.pc?.restartIce(); } catch { /* nothing to restart */ }
     }
   }
 
@@ -136,7 +137,7 @@ export class MediaCalls {
       return;
     }
     if (typeof msg?.call === "string") {
-      this.#callers.set(peerId, { call: msg.call });
+      this.#callers.set(peerId, msg.call);
       if (this.#with(peerId)) this.#ensure(peerId);
       this.opts.onCallers?.();
       return;
@@ -145,6 +146,10 @@ export class MediaCalls {
     // call we have not entered has no connection here to offer to.
     if (!this.#with(peerId)) return;
     const e = this.#ensure(peerId);
+    // One that comes before the connection is made waits for it, and those that wait resume
+    // in the order they came.
+    await e.ready;
+    if (this.#peers.get(peerId) !== e) return;   // closed meanwhile
     try {
       if (msg?.sdp) {
         const collision = msg.sdp.type === "offer" && (e.makingOffer || e.pc.signalingState !== "stable");
@@ -165,40 +170,56 @@ export class MediaCalls {
   /** Whether a peer is in the call with us: we are in one, it is a peer of that call, and
    *  it has said it is in the same. */
   #with(peerId) {
-    return this.#call !== null && this.#callers.get(peerId)?.call === this.#call &&
+    return this.#call !== null && this.#callers.get(peerId) === this.#call &&
       this.#among([peerId]).length > 0;
   }
 
+  /** The entry for a peer in the call with us, made if there is none. Its connection is made
+   *  once the transport has named the ICE servers toward the peer (`iceServers`), so it asks
+   *  the STUN the transport's own do from the start, and negotiates as nothing waits. */
   #ensure(peerId) {
     let e = this.#peers.get(peerId);
-    if (!e) {
-      const pc = new RTCPeerConnection(this.opts.rtcConfig);
-      e = { pc, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false, carrying: new Map() };
-      this.#peers.set(peerId, e);
-      const entry = e;
-      pc.addEventListener("icecandidate", (ev) => {
-        if (ev.candidate) void this.opts.send(peerId, encode({ candidate: ev.candidate.toJSON() })).catch(() => {});
-      });
-      pc.addEventListener("negotiationneeded", async () => {
-        try {
-          entry.makingOffer = true;
-          await pc.setLocalDescription();
-          void this.opts.send(peerId, encode({ sdp: pc.localDescription })).catch(() => {});
-        } catch { /* the next negotiationneeded retries */ }
-        finally { entry.makingOffer = false; }
-      });
-      pc.addEventListener("track", (ev) => this.opts.onTrack?.(peerId, ev.track));
-      pc.addEventListener("connectionstatechange", () => {
-        if (pc.connectionState === "failed") this.#close(peerId);
-      });
+    if (e) {
+      if (e.pc) this.#carryAll(e);
+      return e;
     }
-    // Publish what we carry on a connection that does not carry it yet.
+    e = { pc: null, ready: null, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false, carrying: new Map() };
+    this.#peers.set(peerId, e);
+    const entry = e;
+    e.ready = this.opts.iceServers(peerId).catch(() => []).then((iceServers) => {
+      if (this.#peers.get(peerId) === entry) this.#open(peerId, entry, iceServers);
+    });
+    return e;
+  }
+
+  /** Make a peer's connection, and publish on it what we carry. */
+  #open(peerId, e, iceServers) {
+    const pc = e.pc = new RTCPeerConnection({ iceServers });
+    pc.addEventListener("icecandidate", (ev) => {
+      if (ev.candidate) void this.opts.send(peerId, encode({ candidate: ev.candidate.toJSON() })).catch(() => {});
+    });
+    pc.addEventListener("negotiationneeded", async () => {
+      try {
+        e.makingOffer = true;
+        await pc.setLocalDescription();
+        void this.opts.send(peerId, encode({ sdp: pc.localDescription })).catch(() => {});
+      } catch { /* the next negotiationneeded retries */ }
+      finally { e.makingOffer = false; }
+    });
+    pc.addEventListener("track", (ev) => this.opts.onTrack?.(peerId, ev.track));
+    pc.addEventListener("connectionstatechange", () => {
+      if (pc.connectionState === "failed") this.#close(peerId);
+    });
+    this.#carryAll(e);
+  }
+
+  /** Publish what we carry on a connection that does not carry it yet. */
+  #carryAll(e) {
     for (const { track, stream } of this.#tracks) {
       if (!e.carrying.has(track)) {
         try { e.carrying.set(track, this.#carry(e, track, stream)); } catch { /* closed meanwhile */ }
       }
     }
-    return e;
   }
 
   /** Send a track on a connection, answering the transceiver it goes on. One that only
@@ -220,7 +241,7 @@ export class MediaCalls {
     const e = this.#peers.get(peerId);
     if (!e) return;
     this.#peers.delete(peerId);
-    try { e.pc.close(); } catch { /* already closed */ }
+    try { e.pc?.close(); } catch { /* already closed */ }
     this.opts.onPeerClosed?.(peerId);
   }
 }

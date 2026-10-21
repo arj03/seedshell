@@ -5,8 +5,9 @@
 // protocol dispatch — minus the browser-only WebRTC/DOM. Two shells link through
 // injected ChannelFactory sinks (the shape RtcNetwork implements), the real chat app
 // round-trips messages through the shell's two ops (browser/app-api.js), a later build of
-// it replaces it in place, and the offers app (a second boot bundle, browser/offers-app.js)
-// round-trips an offer. Run it after a seedkernel update:
+// it replaces it in place, and the shell app (the page's boot bundle, assembly/shell-app)
+// carries a notice, a call signal and an offer, each under its own claim. Run it after a
+// seedkernel update:
 //
 //   node scripts/smoke.mjs
 //
@@ -24,13 +25,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 // private to the signed transport bundle.
 const { loadCrypto } = await import("seedkernel-wasm");
 const sodium = await loadCrypto();
-// Each shell boots as shell.js boots the page: the page's loader runs seedkernel's host
-// blob on the browser platform, and that host's `standUp` assembles the node (§12.8,
-// §12.9), the selected transport bundle installed at boot and the adapter built from the
-// transport options passed here. The shells' admit is then ONLY the consent gate.
-const { browserHost } = await import("seedkernel-wasm/platform-web");
+// Each shell boots as shell.js boots the page: the imported host runs on the browser
+// platform over seedkernel's host blob, and that host's `standUp` assembles the node
+// (§12.8, §12.9), the selected transport bundle installed at boot and the adapter built
+// from the transport options passed here. The shells' admit is then ONLY the consent gate.
+const { browserPlatform } = await import("seedkernel-wasm/platform-web");
+const { platformHost } = await import("seedkernel-wasm/platform");
 const HOST_BLOB = new Uint8Array(readFileSync(fileURLToPath(import.meta.resolve("seedkernel-wasm/host.skb"))));
-const standUp = (cfg) => browserHost({ hostBlob: HOST_BLOB }).standUp(cfg);
+const standUp = (cfg) => platformHost(browserPlatform({ hostBlob: HOST_BLOB })).standUp(cfg);
 // `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the host:
 // a replacement transport may spell its claim differently, and then THAT spelling is the
 // one the host reaches. The shell runs the shipped one, so this is the id to agree with.
@@ -42,20 +44,16 @@ const { signBundle, authorBundle, guestOpFraming, hybridAuthorKeysFromSeed }
   = await import("seedkernel-wasm/bundle-author");
 // The shell's contract with its apps: the gate, the consent digest, the context and the two
 // ops. The same module the browser shell runs, so what is exercised here is its contract.
-const { APP_API, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, admitGate, appFacts, bundleDigest, contextJson }
+const { APP_API, APP_OP_CONTEXT, APP_OP_UI, NET_PROTO, admitGate, appFacts, bundleDigest, contextJson, toHex, fromHex }
   = await import("../browser/app-api.js");
 // An app's source directory, read the way scripts/build-app-bundle.mjs reads it: the same
 // guest sources, view and module, so this test signs the bytes the builder would.
-const { readAppSource } = await import("./app-source.mjs");
-// The offers app shape — same guest source scripts/build-boot-bundles.mjs signs into
-// bundle/offers.skb, read directly off disk below.
-const { OFFER_PROTO, OFFERS_KEY_PREFIX, OFFERS_OP_SEND } = await import("../browser/offers-app.js");
-// The identity the page pins its offers boot bundle by, off the generated artifact the
+const { readAppSource, guestLib } = await import("./app-source.mjs");
+// The shell app: how one page talks to another, the signaling path for a call's media, and
+// an offer of an app. The identity the page pins it by is off the generated artifact the
 // page itself reads — so `admit` below is the browser's gate, not a stand-in for it.
-const { OFFERS_AUTHOR_HEX, OFFERS_APP } = await import("../browser/offers-bundle.js");
-// The shell app: how one page talks to another, and the signaling path for a call's media,
-// pinned the same way.
-const { SHELL_PROTO, CALL_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL } = await import("../browser/shell-app.js");
+const { SHELL_PROTO, CALL_PROTO, OFFER_PROTO, SHELL_OP_TELL, SHELL_OP_SIGNAL, SHELL_OP_OFFER }
+  = await import("../browser/shell-app.js");
 const { SHELL_AUTHOR_HEX, SHELL_APP } = await import("../browser/shell-bundle.js");
 // `writeOp` frames an app's own local op; `OpArgs` writes the transport bundle's op
 // arguments, which is what the host's own door into the network takes (`peersOf` below).
@@ -66,15 +64,13 @@ const { writeOp, OpArgs } = await import("seedkernel-wasm/op-frame");
 // build directory off disk.
 const TRANSPORT_BYTES = transportBundleBytes();
 
-const toHex = (b) => Buffer.from(b).toString("hex");
-const fromHex = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 const utf8 = (s) => new TextEncoder().encode(s);
 const text = (b) => new TextDecoder().decode(b);
 const concat = (...parts) => Uint8Array.from(Buffer.concat(parts.map((p) => Buffer.from(p))));
 
 // ── the shell's admit gate ────────────────────────────────────────────────
 // ONE admission predicate (§12.5), and the one branch that is actually the page's: the
-// consent gate. The transport never reaches it — bootShell installs the selected blob
+// consent gate. The transport never reaches it — the assembly installs the selected blob
 // at boot, and ordinary loading cannot acquire `link` — so the FORGED-transport check
 // below exercises the rule the browser shell actually runs under.
 const pendingApprovals = new Set();
@@ -82,11 +78,9 @@ const pendingApprovals = new Set();
 const digestOf = (v) => toHex(bundleDigest(v, (bytes) => genesisHash(sodium, bytes)));
 /** Consent to one bundle, as dropping it or accepting its offer does in the browser. */
 const consent = (blob) => pendingApprovals.add(digestOf(verifyBundle(sodium, blob)));
-// The gate itself is the browser's (`admitGate`, app-api.js), given the same pins shell.js
-// gives it: the offers and shell boot bundles, by the exact author and app this build
-// produced.
-const admit = admitGate([{ author: OFFERS_AUTHOR_HEX, app: OFFERS_APP }, { author: SHELL_AUTHOR_HEX, app: SHELL_APP }],
-  pendingApprovals, (bytes) => genesisHash(sodium, bytes));
+// The gate itself is the browser's (`admitGate`, app-api.js), given the same pin shell.js
+// gives it: the shell boot bundle, by the exact author and app this build produced.
+const admit = admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], pendingApprovals, (bytes) => genesisHash(sodium, bytes));
 
 // ── an instrumented channel pair (mirrors seedkernel's wirePair) ──────────────
 function wirePair() {
@@ -161,8 +155,8 @@ const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 /** The peers a node holds an authenticated link to. Asked of the transport GUEST, through
  *  the host's own door into a co-resident `services` claim (`Shell.call`, seedkernel
- *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the door shell.js's
- *  own ops go through (`netOp`). The driver answers nothing
+ *  §12.10) — the same call seedkernel's CLI makes for a cohort, and the door the page's
+ *  own ops go through (peers.js `net`). The driver answers nothing
  *  peer-shaped: links are the guest's, so this is a round trip through its realm.
  *  `null` is "nothing claims that id" — a node with no transport standing. */
 async function peersOf(shell) {
@@ -399,16 +393,16 @@ try {
 //    the shell reading none of the bytes.
 const ROOM = toHex(new Uint8Array(32).fill(5));     // a room both nodes are in
 const STRAY = toHex(new Uint8Array(32).fill(6));    // one only A is in
-/** The context a shell tells its apps (shell.js `contextNow`), as the `ctx` op's bytes. */
+/** The context a shell tells its apps (peers.js `context`), as the `ctx` op's bytes. */
 const contextOf = (me, rooms, linked, nicks = {}) =>
-  utf8(contextJson({ me, nick: "", rooms, linked, contacts: [], nicks }));
+  utf8(contextJson({ me, nick: "", rooms, linked, contacts: [], nicks: new Map(Object.entries(nicks)) }));
 const roomWith = (id, ...members) => ({ id, name: `room-${id.slice(0, 2)}`, members });
 /** A room frame: [type][room 32][content]. */
 const roomFrame = (type, room, content) => concat([type], fromHex(room), utf8(content));
 try {
   // Each guest is told the context first, and answers it for its own view as render 0.
-  // A nick is the shell's, and rides in the context: one outside ASCII is escaped on the way
-  // in, because a guest reads a byte as a character, and comes out whole for the view.
+  // A nick is the shell's, and rides in the context as UTF-8, which a guest reads with the
+  // op-frame prelude's decoder, and which comes out whole for the view.
   const view = await chatApp.invoke(writeOp(APP_OP_CONTEXT,
     contextOf(peerA, [roomWith(ROOM, peerB), roomWith(STRAY, peerB)], [peerB], { [peerB]: "Zoë" })));
   assert(view[0] === 0, "the context answer is render type 0, for the view");
@@ -493,49 +487,14 @@ try {
   ok("the receive filter is the guest's: only frames for this node are drawn");
 } catch (err) { fail("chat's frames and its receive filter", err); }
 
-// 6. the offers app: a second boot bundle on both shells (browser/offers-app.js), and
-//    a real offer/v1 frame end to end. A's offers app sends an opaque blob under
-//    offer/v1 — its own claim, in both directions — B's offers app
-//    hashes it, stores `[from 32][blob]` under its own fs key, and answers with the
-//    hash; B's view of "a fresh offer arrived" is that answer, delivered through
-//    onInbound exactly like a chat render, with no shell-level claims table anywhere.
-const offersSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/offers.skb")));
-let bOffers = null;
-try {
-  // No consent entry for either load: the offers bundle is admitted by the author+app
-  // pin in `admit` above, which is the whole difference between a boot bundle and an
-  // app a user installs.
-  const aOffers = await A.install(offersSkbBytes);
-  const offersInbound = { hash: null };
-  bOffers = await B.install(offersSkbBytes, {
-    onInbound: (claim, from, answer) => { if (answer.length > 0) offersInbound.hash = new Uint8Array(answer); },
-  });
-  assert(A.resolve(OFFER_PROTO) === aOffers.manifest.app, `A routes "${OFFER_PROTO}" to the offers app`);
-  assert(B.resolve(OFFER_PROTO) === bOffers.manifest.app, `B routes "${OFFER_PROTO}" to the offers app`);
-
-  const offeredBlob = utf8("a bundle blob, opaque to the offers app");
-  // Sent through A's OFFERS app's guest, same as offerApp() in shell.js: only a
-  // guest can call `_net` (§12.10), and the app that owns offer/v1 is the one that
-  // speaks it. No other app's guest is borrowed to carry it.
-  await aOffers.invoke(writeOp(OFFERS_OP_SEND, concat(identityB.publicKey, offeredBlob)));
-
-  await until(() => offersInbound.hash !== null, 4000, "offer notification");
-  const hex = toHex(offersInbound.hash);
-  assert(toHex(sodium.crypto_generichash(32, offeredBlob)) === hex,
-    "the offer notification is the blake2b-256 hash of the blob");
-  const record = await bOffers.fs.get(OFFERS_KEY_PREFIX + hex);
-  assert(record !== null, `B's offers slot holds ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
-  assert(toHex(record.slice(0, 32)) === toHex(identityA.publicKey), "the record's sender is A's key");
-  assert(toHex(record.slice(32)) === toHex(offeredBlob), "the record's blob is the exact bytes A sent");
-  ok(`offer end-to-end: A's offers app → offer/v1 → B's offers app's guest → fs record ${OFFERS_KEY_PREFIX}${hex.slice(0, 12)}…`);
-} catch (err) { fail("offer end-to-end", err); }
-
-// 7. the shell app: a third boot bundle (browser/shell-app.js), and how one page talks to
-//    another. It holds two claims: shell/v1, for what a page tells another about itself,
-//    and call/v1, for a call's signaling, whose media rides a peer connection the page
-//    owns. A's shell app sends one of each, and B's page sees each as its load's onInbound
-//    answer, attributed to A by the channel and under the claim it was sent under, which is
-//    all that tells the two apart.
+// 6. the shell app: the page's boot bundle (assembly/shell-app), and how one page talks to
+//    another. It holds three claims: shell/v1, for what a page tells another about itself,
+//    call/v1, for a call's signaling, whose media rides a peer connection the page owns,
+//    and offer/v1, for an app one page offers another. A's shell app sends one of each, and
+//    B's page sees each as its load's onInbound answer, attributed to A by the channel and
+//    under the claim it was sent under, which is all that tells them apart. No consent entry
+//    for either load: the boot bundle is admitted by the author+app pin in `admit` above,
+//    which is the whole difference between a boot bundle and an app a user installs.
 try {
   const shellSkbBytes = new Uint8Array(readFileSync(resolve(here, "../bundle/shell.skb")));
   const aShell = await A.install(shellSkbBytes);
@@ -543,34 +502,37 @@ try {
   const bShell = await B.install(shellSkbBytes, {
     onInbound: (claim, from, answer) => { if (answer.length > 0) heard.push({ claim, from: toHex(from), bytes: new Uint8Array(answer) }); },
   });
-  for (const proto of [SHELL_PROTO, CALL_PROTO]) {
+  for (const proto of [SHELL_PROTO, CALL_PROTO, OFFER_PROTO]) {
     assert(B.resolve(proto) === bShell.manifest.app, `B routes "${proto}" to the shell app`);
   }
   const notice = utf8(JSON.stringify({ nick: "ada" }));
   const signal = utf8(JSON.stringify({ sdp: { type: "offer", sdp: "v=0" } }));
-  // A tell answers whether the peer's page got it, which is also how a page calls a peer
-  // (shell.js `callPeer`): one nobody answers for is told so, here a key A has no address for.
+  const offered = utf8("a bundle blob, opaque to the shell app");
+  // A tell answers whether the peer's page got it: one nobody answers for is told so, here
+  // a key A has no address for.
   const told = await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, notice)));
   assert(told[0] === 1, "a tell answers that the peer's page got it");
   const unheard = await aShell.invoke(writeOp(SHELL_OP_TELL, concat(new Uint8Array(32).fill(3), notice)));
   assert(unheard.length === 1 && unheard[0] === 0, "a tell to a peer that cannot be reached answers that it was not");
   await aShell.invoke(writeOp(SHELL_OP_SIGNAL, concat(identityB.publicKey, signal)));
-  await until(() => heard.length >= 2, 4000, "a notice and a call signal");
-  for (const [proto, sent, what] of [[SHELL_PROTO, notice, "notice"], [CALL_PROTO, signal, "call signal"]]) {
+  await aShell.invoke(writeOp(SHELL_OP_OFFER, concat(identityB.publicKey, offered)));
+  await until(() => heard.length >= 3, 4000, "a notice, a call signal and an offer");
+  for (const [proto, sent, what] of [[SHELL_PROTO, notice, "notice"], [CALL_PROTO, signal, "call signal"], [OFFER_PROTO, offered, "offer"]]) {
     const got = heard.filter((h) => h.claim === proto);
     assert(got.length === 1, `one frame arrived under ${proto}`);
     assert(got[0].from === peerA, `the ${what} is attributed to A by the channel`);
     assert(toHex(got[0].bytes) === toHex(sent), `the ${what} arrives byte for byte`);
   }
-  // An op the guest does not have sends nothing, under either claim.
+  // An op the guest does not have sends nothing, under any claim.
   await aShell.invoke(writeOp("send", concat(identityB.publicKey, notice)));
+  await aShell.invoke(writeOp("toString", concat(identityB.publicKey, notice)));
   await aShell.invoke(writeOp(SHELL_OP_TELL, concat(identityB.publicKey, utf8("last"))));
-  await until(() => heard.length >= 3, 4000, "the frame behind an unknown op");
-  assert(heard.length === 3 && text(heard[2].bytes) === "last", "an op the shell app does not have sends nothing");
-  ok("page to page end-to-end: A's shell app → shell/v1 and call/v1 → B's shell app → onInbound, each under its own claim");
+  await until(() => heard.length >= 4, 4000, "the frame behind an unknown op");
+  assert(heard.length === 4 && text(heard[3].bytes) === "last", "an op the shell app does not have sends nothing");
+  ok("page to page end-to-end: A's shell app → shell/v1, call/v1 and offer/v1 → B's shell app → onInbound, each under its own claim");
 } catch (err) { fail("page to page end-to-end", err); }
 
-// 8. the jam app: a second app beside chat, under its own label and its own protocol, with
+// 7. the jam app: a second app beside chat, under its own label and its own protocol, with
 //    no module at all. Its guest is the room pipe (assembly/guest-lib/room-pipe.js) and one
 //    thing more, a name for the blocks of audio passing through it: a frame its view casts
 //    reaches the room's members, one it tells reaches one of them, and a block is drawn
@@ -628,7 +590,7 @@ try {
   ok(`jam: cast and tell scoped to a room, and a ${block.length / 1024} KB block named by its hash at both ends`);
 } catch (err) { fail("jam app", err); }
 
-// 8b. the room pipe on its own: the hello app (assembly/hello-app), whose state lives in its
+// 7b. the room pipe on its own: the hello app (assembly/hello-app), whose state lives in its
 //     view. Its app.json names no guest, no protocol and no reach, so the builder gives it
 //     the room pipe, a claim on its own label, and the network, and tells the guest the
 //     protocol the pipe sends under (`APP.protocols`).
@@ -665,7 +627,7 @@ try {
   ok("hello, an app.json and a page: the room pipe is its guest, with cast and tell scoped to a room");
 } catch (err) { fail("the room pipe on its own", err); }
 
-// 8c. the radio app (assembly/radio-app): another bundle, under another label, that claims
+// 7c. the radio app (assembly/radio-app): another bundle, under another label, that claims
 //     the protocol jam claims. It has no view, since what stands in front of its guest is a
 //     program on a node with no page (node/shell.mjs), and its guest is jam's own. A claim
 //     has one holder, so on B it stands where jam stood, and what A's jam casts reaches it:
@@ -701,7 +663,7 @@ try {
   ok("the radio app: another bundle, with no view, takes jam's claim and speaks its protocol");
 } catch (err) { fail("radio app", err); }
 
-// 9. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
+// 8. the gate a bundle passes before it is installed (peekBundle → appFacts). A peer's
 // bundle is installed on one click of a row showing a name and an author, so the reach it
 // declares is the whole of what that click grants. The shell hosts any app, so the gate is
 // not about what an app is for: it is the contract version it was built to, and a reach
@@ -730,20 +692,19 @@ try {
   ok("the install gate admits any app within the shell's grants and its contract version");
 } catch (err) { fail("install gate", err); }
 
-// 9b. what an app may send under. The transport sends under whatever protocol it is handed,
+// 8b. what an app may send under. The transport sends under whatever protocol it is handed,
 //     and the protocol is what decides which app at the far end a frame is for, so an app
 //     that could name any protocol could write as any other app on its node, and as the
 //     page. The kernel holds each app's `send` to the protocol ids its own manifest claims
 //     (seedkernel §12.10). This app sends under whichever protocol it is told to.
 try {
-  const lib = (name) => readFileSync(resolve(here, "../assembly/guest-lib", name), "utf8").replace(/\r\n/g, "\n");
   const OWN_PROTO = "gated/smoke", NEXT_PROTO = "gated/next";
   // Its `send` op is `[to 32][n u8][protocol][payload]`; `raw` hands the transport the bytes
   // as they are, for asking it something no app should; a peer's frame is answered as it came.
   const gatedSource = (protocols, version) => authorBundle(sodium, authorA, {
     app: "gated", version, protocols, modules: [], guestRequires: [NET_PROTO],
     guestConfig: { shell: { api: APP_API, name: "Gated" } },
-    guestSource: `${guestOpFraming()}\n${lib("net.js")}
+    guestSource: `${guestOpFraming()}\n${guestLib("net.js")}
 async function handle(arg) {
   const { fromHost, body } = callerOf(arg);
   if (!fromHost) return body;
@@ -801,10 +762,16 @@ async function handle(arg) {
   ok("an app is held to the protocols it claims: nothing leaves under another app's, or the page's");
 } catch (err) { fail("sends held to claims", err); }
 
-// 10. the two transport ops the page's rooms and contacts rest on: `welcome` names the
+// 9. the transport ops the page's rooms and contacts rest on: `dial` is how a page calls a
+//    peer it wants linked, `ice` the STUN its own media connections ask, `welcome` names the
 //    room-mates, whose calls need no contact secret, and `forget` drops one peer and its
 //    links, which is how leaving a room hangs up without touching anyone else.
 try {
+  const dial = async (key) => (await A.call(NET_PROTO, new OpArgs("dial").blob(key).u32(2000).build()))[0];
+  assert(await dial(identityB.publicKey) === 1, "a dial to a linked peer answers that it is linked");
+  assert(await dial(new Uint8Array(32).fill(4)) === 0, "and one to a key the transport has no address for, that it is not");
+  const ice = JSON.parse(text(await A.call(NET_PROTO, new OpArgs("ice").blob(identityB.publicKey).build())));
+  assert(Array.isArray(ice), "`ice` answers the ICE servers toward a peer, as RTCConfiguration JSON");
   const welcomed = A.call(NET_PROTO, new OpArgs("welcome").blob(identityB.publicKey).build());
   assert(welcomed !== null, "the transport answers `welcome`");
   await welcomed;
@@ -812,8 +779,8 @@ try {
   await A.call(NET_PROTO, new OpArgs("forget").blob(identityB.publicKey).build());
   await until(async () => !(await peersOf(A)).includes(peerB) && !(await peersOf(B)).includes(peerA),
     4000, "the forgotten peer's link to close at both ends");
-  ok("the transport welcomes room-mates, and forgets one peer without a reset");
-} catch (err) { fail("welcome and forget", err); }
+  ok("the transport dials one peer, names its STUN, welcomes room-mates, and forgets one peer without a reset");
+} catch (err) { fail("dial, ice, welcome and forget", err); }
 
 try { B.close(); } catch {}
 try { A.close(); } catch {}

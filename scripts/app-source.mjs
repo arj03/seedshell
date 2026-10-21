@@ -19,6 +19,8 @@
 //                 stylesheets and scripts it names are put into it (`readView`)
 //   modules       its pure wasm modules, by the name the guest calls each; may be empty.
 //                 One named by its AssemblyScript entry (`.ts`) is compiled here
+//   boot          true for one of the shell's own boot bundles, which the page loads at
+//                 boot by its pin rather than a user installing it (build-app-bundle.mjs)
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -30,16 +32,19 @@ import { NET_PROTO, appFacts } from "../browser/app-api.js";
  *  in a filename on every platform. */
 const APP_LABEL = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** The guest of an app that lists none: the room pipe, a guest whole. */
+/** LF everywhere: these bytes are signed, and a checkout's line endings are the machine's. */
+const lf = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+
+/** One of assembly/guest-lib's files, as it is signed into a guest. */
 const GUEST_LIB = join(dirname(fileURLToPath(import.meta.url)), "../assembly/guest-lib");
-const PIPE_GUEST = ["net.js", "context.js", "room-pipe.js"].map((name) => join(GUEST_LIB, name));
+export const guestLib = (name) => lf(join(GUEST_LIB, name));
+
+/** The guest of an app that lists none: the room pipe, a guest whole. */
+const PIPE_GUEST = ["net.js", "context.js", "room-pipe.js"];
 
 /** How a module's AssemblyScript is compiled. Its output stays in memory, since what is
  *  signed is the bytes and nothing reads a build of them off disk. */
 const ASC_FLAGS = ["--optimizeLevel", "3", "--shrinkLevel", "2", "--noAssert", "--exportRuntime", "--maximumMemory", "256"];
-
-/** LF everywhere: these bytes are signed, and a checkout's line endings are the machine's. */
-const lf = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 
 /** A module's wasm: a built `.wasm` as it is, or an AssemblyScript entry compiled. */
 async function moduleWasm(path) {
@@ -79,7 +84,8 @@ function readView(rel, text) {
 }
 
 /** Everything `authorBundle` takes for the app in `appDir` but its version, which is the
- *  author's count to keep. `guestOpFraming` is seedkernel's, from `/bundle-author`. */
+ *  author's count to keep, and `boot`, which `authorBundle` does not read: whether it is one
+ *  of the shell's boot bundles. `guestOpFraming` is seedkernel's, from `/bundle-author`. */
 export async function readAppSource(appDir, guestOpFraming) {
   const text = (rel) => lf(join(appDir, rel));
   const app = JSON.parse(text("app.json"));
@@ -92,10 +98,11 @@ export async function readAppSource(appDir, guestOpFraming) {
   for (const [name, rel] of Object.entries(app.modules ?? {})) modules.push({ name, wasm: await moduleWasm(join(appDir, rel)) });
 
   const source = {
+    boot: app.boot === true,
     app: app.app,
     protocols,
     modules,
-    guestSource: [guestOpFraming(), ...(app.guest ? app.guest.map(text) : PIPE_GUEST.map(lf))].join("\n"),
+    guestSource: [guestOpFraming(), ...(app.guest ? app.guest.map(text) : PIPE_GUEST.map(guestLib))].join("\n"),
     guestRequires: app.requires ?? [NET_PROTO],
     guestConfig: {
       // What the app claims, said again for its guest: a guest is handed its config (`APP`)

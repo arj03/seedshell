@@ -33,14 +33,12 @@
      the fallback is script-src, which has no blob:, and every module bind — so every
      app install — fails at the CSP.
 
-     'unsafe-eval' is for the host: the page's loader evaluates the host blob's own
-     script (seedkernel's browserHost), as the Node loader does. A view gains nothing by
-     it, since its own policy applies beside this one and has no 'unsafe-eval'; in this
-     document it opens nothing that 'unsafe-inline' does not. -->
+     There is no 'unsafe-eval': the page imports the host rather than evaluating the
+     host blob's script, and takes only the blob's engine and crypto (shell.js). -->
 
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
-  script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline';
+  script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
   connect-src 'self' ws: wss:;
   worker-src 'self' blob:;
@@ -166,9 +164,7 @@
         <h3 class="step-title">Installed</h3>
       </header>
       <div class="step-body">
-        <ul id="app-list" class="app-list">
-          <li class="empty-row">No apps installed yet.</li>
-        </ul>
+        <ul id="app-list" class="app-list"></ul>
       </div>
     </section>
   </div>
@@ -288,13 +284,15 @@
 
 <!-- The seedkernel surface the shell depends on, declared in one place. `npm run vendor`
      copies seedkernel-wasm's built host (build-min: host/ + services/) into
-     ./vendor/seedkernel/, and seedkernel's host blob (the host script, its realm engine and
-     its crypto) to ./vendor/host.skb, which shell.js fetches and runs; the seedkernel-wasm/*
-     specifiers below are the entire contract between this page and the runtime. -->
+     ./vendor/seedkernel/, and seedkernel's host blob (its realm engine and its crypto) to
+     ./vendor/host.skb, which host-blob.js fetches and shell.js hands to the browser platform;
+     the seedkernel-wasm/* specifiers below are the entire contract between this page and the
+     runtime. -->
 <script type="importmap">
 {
   "imports": {
     "seedkernel-wasm/platform-web":  "./vendor/seedkernel/host/platform-web.js",
+    "seedkernel-wasm/platform":      "./vendor/seedkernel/host/platform.js",
     "seedkernel-wasm/net-rtc":       "./vendor/seedkernel/services/net-rtc.js",
     "seedkernel-wasm/net-ws":        "./vendor/seedkernel/services/net-ws.js",
     "seedkernel-wasm/socket-seam":   "./vendor/seedkernel/services/socket-seam.js",
@@ -304,6 +302,8 @@
   }
 }
 </script>
+<!-- Before shell.js, so the host blob downloads while shell.js's imports load. -->
+<script type="module" src="./host-blob.js"></script>
 <script type="module" src="./shell.js"></script>
 </body>
 </html>

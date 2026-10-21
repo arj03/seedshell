@@ -47,10 +47,8 @@ function isForMe(from, frame) {
 /** The peers this node's own frame goes to, by key hex. A room frame goes to the linked
  *  members of its room. A direct one goes to its addressee, linked or not: the transport
  *  dials a contact it has an address for, and the view asks the shell to make it one. */
-async function audienceOf(frame) {
-  if (isDirect(frame[0])) return [headOf(frame)];
-  const room = headOf(frame);
-  return (await netPeers()).filter((p) => inRoom(room, p));
+function audienceOf(frame) {
+  return isDirect(frame[0]) ? [headOf(frame)] : linkedIn(headOf(frame));
 }
 
 /** Have the module draw `frame` as `sender`'s. A peer's frame and this node's own echo go
@@ -72,6 +70,6 @@ guest.peer = (caller, frame) => (isForMe(toHex(caller), frame) ? render(caller, 
  *  reached, and the rest still are. */
 guest.view = async (frame) => {
   if (frame.length < 33 || !(isRoom(frame[0]) || isDirect(frame[0]))) return EMPTY;
-  await Promise.all((await audienceOf(frame)).map((p) => netSend(fromHex(p), CHAT, frame).catch(() => {})));
+  await Promise.all(audienceOf(frame).map((p) => netSend(fromHex(p), CHAT, frame).catch(() => {})));
   return render(ME, frame);
 };

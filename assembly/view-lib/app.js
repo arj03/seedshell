@@ -16,6 +16,8 @@
 //                                  started from the shell is with it
 //   app.contact(peer)              make a peer a contact, so the link to it outlives any
 //                                  shared room
+//   app.nameOf(key)                what a peer, or this node, calls itself, by the last
+//                                  context, or the start of its key
 //
 // And the view's half of guest-lib/room-pipe.js, for an app whose guest is that pipe or
 // builds on it:
@@ -55,6 +57,8 @@ const app = (() => {
   /** Who listens for what. `onContext` and `onFrame` each take one kind of render out of
    *  what `onRender` hears. */
   const heard = { render: null, context: null, frame: null };
+  /** The node's context as last told, for `nameOf`. */
+  let ctx = null;
   /** The calls not yet answered, by the id each went out under. */
   const calls = new Map();
   let nextCall = 1;
@@ -85,8 +89,10 @@ const app = (() => {
     }
     if (msg.type !== "render") return;
     const p = bytesOf(msg.payload);
-    if (p[0] === RENDER_CONTEXT && heard.context) heard.context(JSON.parse(dec.decode(p.subarray(1))));
-    else if (p[0] === RENDER_FRAME && p.length >= 65 && heard.frame) {
+    if (p[0] === RENDER_CONTEXT) {
+      ctx = JSON.parse(dec.decode(p.subarray(1)));
+      heard.context?.(ctx);
+    } else if (p[0] === RENDER_FRAME && p.length >= 65 && heard.frame) {
       heard.frame(toHex(p.subarray(1, 33)), toHex(p.subarray(33, 65)), p.subarray(65));
     } else if (heard.render) heard.render(p);
   });
@@ -98,6 +104,7 @@ const app = (() => {
     onContext: (fn) => { heard.context = fn; },
     conv: (open = {}) => post({ type: "conv", room: open.room, to: open.to }),
     contact: (peer) => post({ type: "contact", peer }),
+    nameOf: (key) => (key === ctx?.me ? ctx.nick : ctx?.nicks[key]) || key.slice(0, 8),
     // Fire-and-forget, as the pipe is: neither is answered with anything, and a guest that
     // failed has said so in the shell's Diagnostics.
     cast: (room, ...parts) => { call([ASK_CAST], fromHex(room), ...parts).catch(() => {}); },

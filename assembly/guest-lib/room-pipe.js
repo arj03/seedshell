@@ -58,9 +58,7 @@ function pipePeer(caller, frame) {
 async function pipeView(ask) {
   const rest = ask.subarray(1);
   if (ask[0] === ASK_CAST && rest.length >= 32) {
-    const room = roomOf(rest);
-    const members = (await netPeers()).filter((p) => inRoom(room, p));
-    await Promise.all(members.map((p) => netSend(fromHex(p), PIPE_PROTO, rest).catch(() => {})));
+    await Promise.all(linkedIn(roomOf(rest)).map((p) => netSend(fromHex(p), PIPE_PROTO, rest).catch(() => {})));
   }
   if (ask[0] === ASK_TELL && rest.length >= 64) {
     const to = rest.subarray(0, 32), frame = rest.subarray(32);

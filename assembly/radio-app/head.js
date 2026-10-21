@@ -40,10 +40,11 @@ const MAX_WAITING = 32;
  *  matched against, and the same titles by path. */
 let titles = [];
 const byPath = new Map();
-/** The titles by their file's size, to find a track's file among them (`reclaim`). */
+/** A title of each size the files come in, the first walked to, to find a track's file
+ *  among them (`reclaim`). */
 const bySize = new Map();
 
-const who = (id) => (id === me ? myNick : nicks.get(id)) || id.slice(0, 8);
+const who = app.nameOf;
 /** What happens in a room, said on the console. A nick or a title is a peer's word, and may
  *  hold control characters, which a terminal acts on: none are printed. */
 const say = (room, text) => console.log(`#${room.name}: ${text}`.replace(/[\x00-\x1f\x7f-\x9f]/g, ""));
@@ -77,8 +78,7 @@ function onPick(room, from, ask) {
     try {
       if (rooms.get(room.id) !== room || room.tracks.has(ask.id)) return;
       say(room, `${who(from)} picked ${title.path}`);
-      const name = title.path.slice(title.path.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "");
-      await addTrack(room, ask.id, await music.open(title.path), name || title.path);
+      await addTrack(room, ask.id, await music.open(title.path), leafOf(title.path));
     } catch (err) {
       say(room, `${title.path} was not added: ${err.message}`);
       miss(err.message);
@@ -89,7 +89,7 @@ function onPick(room, from, ask) {
 /** Hold `t` again if a title is the size its file was, and tell the room. Each of its blocks
  *  is read from that title's file, cut the first time any of them is asked for. */
 function reclaim(room, t) {
-  const title = bySize.get(t.size)?.[0];
+  const title = bySize.get(t.size);
   if (!title || !t.blocks || t.gone) return;
   let cut = null;
   const block = (id, of) => ({
@@ -150,8 +150,7 @@ music.titles().then((found) => {
   titles = found.filter((t) => t.path.length <= MAX.path).map(({ path, size }) => ({ path, size, lower: path.toLowerCase() }));
   for (const t of titles) {
     byPath.set(t.path, t);
-    if (!bySize.has(t.size)) bySize.set(t.size, []);
-    bySize.get(t.size).push(t);
+    if (!bySize.has(t.size)) bySize.set(t.size, t);
   }
   jam.library = titles.length;
   console.log(`the library holds ${titles.length} title${titles.length === 1 ? "" : "s"}`);

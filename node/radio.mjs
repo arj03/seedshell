@@ -23,13 +23,12 @@ import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
 import { hostApp, toHex, fromHex } from "./shell.mjs";
+import { ROOM_NAME_RE } from "../browser/peers.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The files a library takes: the two formats jam can cut (assembly/jam-app/formats.js). */
 const AUDIO = /\.(flac|ogg|oga)$/i;
-/** A room's name, as the page takes one (shell.js). */
-const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 function usage(why) {
   if (why) console.error(`radio: ${why}`);
@@ -60,19 +59,18 @@ if (!existsSync(bundlePath)) usage(`${bundlePath} not found: run \`npm run build
 // ── the directory, as a library ───────────────────────────────────────────────
 
 /** Every audio file under the directory, each by its path from it, with `/` between its
- *  parts whatever the platform. A folder that cannot be read is passed over. */
+ *  parts whatever the platform. A folder that cannot be read is passed over. A folder's
+ *  entries are looked at together, not one after another. */
 async function walk(under = "") {
-  const out = [];
   const entries = await readdir(join(dir, under), { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
+  const found = await Promise.all(entries.map(async (entry) => {
     const path = under ? `${under}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) out.push(...await walk(path));
-    else if (entry.isFile() && AUDIO.test(entry.name)) {
-      const size = await stat(join(dir, path)).then((s) => s.size, () => -1);
-      if (size > 0) out.push({ path, size });
-    }
-  }
-  return out;
+    if (entry.isDirectory()) return walk(path);
+    if (!entry.isFile() || !AUDIO.test(entry.name)) return [];
+    const size = await stat(join(dir, path)).then((s) => s.size, () => -1);
+    return size > 0 ? [{ path, size }] : [];
+  }));
+  return found.flat();
 }
 
 /** A file as jam reads one (assembly/jam-app/room.js `addTrack`): the bytes `[start, end)`

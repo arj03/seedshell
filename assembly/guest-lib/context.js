@@ -12,18 +12,20 @@ const EMPTY = new Uint8Array(0);
 const OP_CONTEXT = "ctx";
 const OP_UI = "ui";
 
-/** The rooms this node is in, by id in hex, each the set of keys the relay lists there. */
+/** The rooms this node is in, by id in hex, each the set of keys the relay lists there, and
+ *  the peers it is linked to. The shell tells a guest the context each time either changes. */
 let rooms = new Map();
+let linked = [];
 
 /** The `ctx` op: keep the part of the context a guest decides with, and answer all of it
  *  for the view as render type 0, `[0][the same JSON]`. The view hears of rooms, linked
  *  peers, contacts and names only this way, so it and the guest never hold two different
- *  pictures. The JSON is ASCII, so it reads one character per byte: a realm has no
- *  TextDecoder. */
+ *  pictures. The JSON is UTF-8, read with the op-frame prelude's `utf8Decode`, since a realm
+ *  has no TextDecoder. */
 function setContext(json) {
-  let text = "";
-  for (let i = 0; i < json.length; i++) text += String.fromCharCode(json[i]);
-  rooms = new Map(JSON.parse(text).rooms.map((r) => [r.id, new Set(r.members)]));
+  const ctx = JSON.parse(utf8Decode(json));
+  rooms = new Map(ctx.rooms.map((r) => [r.id, new Set(r.members)]));
+  linked = ctx.linked;
   const out = new Uint8Array(1 + json.length);
   out.set(json, 1);
   return out;
@@ -33,6 +35,11 @@ function setContext(json) {
 function inRoom(room, peer) {
   const members = rooms.get(room);
   return members !== undefined && members.has(peer);
+}
+
+/** The linked peers the relay lists in the joined room `room`, by key hex. */
+function linkedIn(room) {
+  return linked.filter((p) => inRoom(room, p));
 }
 
 /** What this guest does with the two things that reach it besides the context, each a

@@ -1,6 +1,6 @@
 {
   "app": "radio",
-  "api": 2,
+  "api": 3,
   "name": "Radio",
   "version": "v1",
   "description": "a jam room's library: a directory of music, for the room to play",

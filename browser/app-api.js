@@ -37,7 +37,7 @@
 /** The version of this contract. An app's manifest names the one it was built for
  *  (`guest.config.shell.api`), and the shell runs no other: a bundle from before a change
  *  to the doors below is refused by name instead of installed and left silent. */
-export const APP_API = 2;
+export const APP_API = 3;
 
 /** The local service name the transport bundle serves (the `_net` of the bundled
  *  composition; no host semantics attach to the spelling). Named here rather than
@@ -68,7 +68,7 @@ export const APP_GRANTS = {
  *  `[zero 32][opLen u8][op][bytes]`. NAMES rather than bytes: an op a guest does not
  *  implement then fails by name instead of landing on a neighbouring case.
  *
- *    ctx   the node's context as ASCII JSON (`contextJson`): who this node is, the rooms
+ *    ctx   the node's context as UTF-8 JSON (`contextJson`): who this node is, the rooms
  *          it is in and who is in each, the linked peers, the contacts, and what each
  *          is called. Sent after the install, when it changes, and when the app's view
  *          says it is ready.
@@ -79,6 +79,10 @@ export const APP_GRANTS = {
  *  `ctx` answers render bytes for the view, as a peer's frame does, or nothing. */
 export const APP_OP_CONTEXT = "ctx";
 export const APP_OP_UI = "ui";
+
+/** Renders held for a view, or a head, that has not said it is ready; past this the oldest
+ *  go. Bounded, since a peer's frames arrive whether or not anything is drawing them. */
+export const MAX_QUEUED_RENDERS = 512;
 
 /** What the shell reads off a verified manifest, or the reason it will not run the bundle,
  *  thrown. It is all in the SIGNED manifest, under `guest.config.shell`:
@@ -130,16 +134,15 @@ export function bundleDigest(v, hash) {
     return hash(all);
 }
 
-/** The shell's admission gate, the one predicate `bootShell` takes as `admit` (seedkernel
- *  §12.5). `pins` are the shell's own boot bundles, each `{ author, app }` with the author in
- *  hex: bytes the deployment shipped, loaded before any dialog could run, so there is
- *  nothing there for a click to decide. Every other bundle is one the user consented to:
+/** The shell's admission gate, the one predicate a node is assembled with as `admit`
+ *  (seedkernel §12.5). `pins` are the shell's own boot bundles, each `{ author, app }` with
+ *  the author in hex: bytes the deployment shipped, loaded before any dialog could run, so
+ *  there is nothing there for a click to decide. Every other bundle is one the user consented to:
  *  `consents` holds the digest of each (`bundleDigest`, in hex), and admitting a bundle
  *  takes its consent, so one consent is one install. */
 export function admitGate(pins, consents, hash) {
-    const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-    return (v) => pins.some((p) => p.author === hex(v.author) && p.app === v.manifest.app)
-        || consents.delete(hex(bundleDigest(v, hash)));
+    return (v) => pins.some((p) => p.author === toHex(v.author) && p.app === v.manifest.app)
+        || consents.delete(toHex(bundleDigest(v, hash)));
 }
 
 /** The context as the `ctx` op carries it: JSON with every key and id in lowercase hex.
@@ -151,9 +154,24 @@ export function admitGate(pins, consents, hash) {
  *  that has said calls itself. A nick is a peer's own word, not proof of who it is: the
  *  key is what the channel authenticated.
  *
- *  ASCII only, anything else escaped, because a guest's realm has no TextDecoder: it reads
- *  one character per byte and parses. A contact's secret is never in it. */
-export function contextJson(context) {
-    return JSON.stringify({ api: APP_API, ...context })
-        .replace(/[\u0080-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+ *  Each list is sorted here, and `nicks` (a Map) by key, so the same context is always the
+ *  same text, and a shell tells a guest of a change by comparing two. A guest reads it with
+ *  the op-frame prelude's `utf8Decode`. A contact's secret is never in it. */
+export function contextJson({ me, nick, rooms, linked, contacts, nicks }) {
+    const sorted = (keys) => [...keys].sort();
+    return JSON.stringify({
+        api: APP_API, me, nick,
+        rooms: rooms.map((r) => ({ id: r.id, name: r.name, members: sorted(r.members) })),
+        linked: sorted(linked),
+        contacts: sorted(contacts),
+        nicks: Object.fromEntries([...nicks].sort(([a], [b]) => (a < b ? -1 : 1))),
+    });
+}
+
+/** Bytes as lowercase hex, and back: how a key, a room and a digest are named. */
+export function toHex(bytes) {
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+export function fromHex(hex) {
+    return Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
 }
