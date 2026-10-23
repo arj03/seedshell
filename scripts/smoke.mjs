@@ -376,7 +376,8 @@ try {
   const [aRoutes, bRoutes] = await Promise.all([routesOf(A), routesOf(B)]);
   assert(aRoutes.get(peerB) === true && bRoutes.get(peerA) === true,
     "`routes` must answer each linked peer, and read a dialed link as direct");
-  assert(toldB?.relay === 0 && toldB.linked.length === 1 && toHex(toldB.linked[0].key) === peerA && toldB.linked[0].direct,
+  // `[relay u8]`, then `[key 32][direct u8]` per linked peer.
+  assert(toldB?.length === 34 && toldB[0] === 0 && toHex(toldB.subarray(1, 33)) === peerA && toldB[33] === 1,
     "B must be told the same without asking, when A linked, behind its relay's state, which is none (`onStatus`)");
   ok("the transport answers how each peer is reached, and tells it when it changes");
 

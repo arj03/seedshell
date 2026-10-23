@@ -118,10 +118,14 @@ export class Peers {
 
   // ── the transport ──────────────────────────────────────────────────────────
 
-  /** What the transport says each time its relay or its links change (`onStatus`). */
-  status({ relay, linked }) {
-    this.relayState = relay;
-    this.linked = new Map(linked.map(({ key, direct }) => [toHex(key), direct]));
+  /** What the transport says each time its relay or its links change (`onStatus`), as its
+   *  `link/status` bytes: `[relay u8]`, then `[key 32][direct u8]` per linked peer. */
+  status(status) {
+    this.relayState = status[0];
+    this.linked = new Map();
+    for (let off = 1; off + 33 <= status.length; off += 33) {
+      this.linked.set(toHex(status.subarray(off, off + 32)), status[off + 32] === 1);
+    }
     this.follow();
   }
 
