@@ -132,7 +132,11 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     if (!ready || json === told) return;
     told = json;
     try { render(await guest.invoke(writeOp(APP_OP_CONTEXT, new TextEncoder().encode(json))), true); }
-    catch (err) { say(`${facts.name}: ${err.message}`); }
+    catch (err) {
+      say(`${facts.name}: ${err.message}`);
+      // Not delivered: forget it, so the next change tries again.
+      if (told === json) told = null;
+    }
   }
 
   /** Handle a message from the head, as the page handles a view's: `ready`, and `call`

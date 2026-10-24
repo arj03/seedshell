@@ -449,9 +449,15 @@ function invokeApp(rec, op, bytes) {
 /** Send the current context to `rec`'s guest; resolves to its answer (render bytes, or
  *  empty on failure). */
 async function tellContext(rec) {
+  // Marked as sent up front so concurrent `postContext` calls don't repeat it.
   const json = rec.ctx = peers.context();
   try { return await invokeApp(rec, APP_OP_CONTEXT, new TextEncoder().encode(json)); }
-  catch (err) { shellPrint(`${rec.name}: ${err.message}`, "err"); return new Uint8Array(0); }
+  catch (err) {
+    shellPrint(`${rec.name}: ${err.message}`, "err");
+    // Not delivered: forget it, so the next `postContext` tries again.
+    if (rec.ctx === json) rec.ctx = null;
+    return new Uint8Array(0);
+  }
 }
 
 /** Send the context to every app whose guest hasn't seen this version of it, and forward
@@ -548,9 +554,22 @@ function peekBundle(bundleBytes) {
   };
 }
 
+// Installs and removals run one at a time, so two of them never race on the same label
+// (e.g. accepting an offer while a dropped file for that app is still installing).
+let appChanges = Promise.resolve();
+function queueAppChange(change) {
+  const run = appChanges.then(change);
+  appChanges = run.catch(() => {});
+  return run;
+}
+
 // Install a bundle the user consented to (dropped, accepted from an offer, or restored after
 // a reload) and return its AppRecord. `peeked` skips re-reading an already-read bundle.
 async function applyAppBundle(bundleBytes, peeked = peekBundle(bundleBytes)) {
+  return queueAppChange(() => installApp(bundleBytes, peeked));
+}
+
+async function installApp(bundleBytes, peeked) {
   const { key } = peeked;
   // Taking over a label takes its data too. Same author = upgrade; a different author's
   // bundle under the same label needs explicit confirmation.
@@ -564,6 +583,8 @@ async function applyAppBundle(bundleBytes, peeked = peekBundle(bundleBytes)) {
   const record = {
     ...peeked,
     bundleBytes,
+    /** Hash of the raw bundle bytes, to spot a repeated offer before verifying it. */
+    raw: toHex(digest(bundleBytes)),
     /** Calls into this app's guest. */
     invoke: null,
     frame: null,
@@ -688,25 +709,31 @@ function showNoApp() {
 // what authenticates it; the forwarding peer is only identified by the channel.
 //
 // Offers wait in memory, keyed by digest, until accepted, dismissed or the page reloads.
-const pendingOffers = new Map();   // bundle digest → { bundleBytes, peeked, fromPkHex }
+const pendingOffers = new Map();   // bundle digest → { bundleBytes, raw, peeked, fromPkHex }
 
 /** Max pending offers per peer (an offer costs the sender only one frame). */
 const MAX_OFFERS_PER_PEER = 8;
 
+/** Max size of an offered bundle. */
+const MAX_OFFER_BYTES = 8 * 1024 * 1024;
+
 function handleOffer(bundleBytes, fromPkHex) {
+  const drop = (why) => shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${why}`, "err");
+  // Cheap checks first: verifying a bundle (Ed25519 + ML-DSA) is the expensive part, and a
+  // linked peer can send offers as fast as it likes.
+  if (bundleBytes.length > MAX_OFFER_BYTES) return drop(`it is over ${MAX_OFFER_BYTES >> 20} MiB`);
+  if ([...pendingOffers.values()].filter((o) => o.fromPkHex === fromPkHex).length >= MAX_OFFERS_PER_PEER) {
+    return drop(`it has ${MAX_OFFERS_PER_PEER} waiting here already`);
+  }
+  // Skip bytes we already run or already have on offer, without verifying them again.
+  const raw = toHex(digest(bundleBytes));
+  if ([...pendingOffers.values(), ...installedApps.values()].some((o) => o.raw === raw)) return;
   let peeked;
   try { peeked = peekBundle(bundleBytes); }
-  catch (err) {
-    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: ${err.message}`, "err");
-    return;
-  }
-  // Skip a bundle we already run or already have on offer. Any update has a new digest.
+  catch (err) { return drop(err.message); }
+  // Same check by digest, which also catches identical content signed again.
   if (pendingOffers.has(peeked.hash) || [...installedApps.values()].some((rec) => rec.hash === peeked.hash)) return;
-  if ([...pendingOffers.values()].filter((o) => o.fromPkHex === fromPkHex).length >= MAX_OFFERS_PER_PEER) {
-    shellPrint(`Offer from ${fromPkHex.slice(0, 8)} dropped: it has ${MAX_OFFERS_PER_PEER} waiting here already`, "err");
-    return;
-  }
-  pendingOffers.set(peeked.hash, { bundleBytes, peeked, fromPkHex });
+  pendingOffers.set(peeked.hash, { bundleBytes, raw, peeked, fromPkHex });
   renderOfferList();
   if (!tabs.apps.btn.classList.contains("active")) tabs.apps.btn.classList.add("unread");
   shellPrint(`${fromPkHex.slice(0, 8)} offers app "${peeked.name}" — see the Apps tab.`, "sys");
@@ -859,13 +886,20 @@ function removeApp(key) {
   const rec = installedApps.get(key);
   if (!rec) return;
   if (!confirm(`Remove ${rec.name} ${rec.version}? The app will be uninstalled.`)) return;
-  // Uninstall drops the label's slot: its protocol claims and guest realm (§12.5).
-  shell.uninstall(key);
-  installedApps.delete(key);
-  unmountView(rec);
-  if (activeAppKey === key) showNoApp();
-  forgetApp(key);
-  renderAppList();
+  void queueAppChange(() => {
+    // Replaced while the dialog was open: that's not the app the user chose to remove.
+    if (installedApps.get(key) !== rec) {
+      shellPrint(`${rec.name} ${rec.version} was replaced meanwhile, so it was not removed.`, "err");
+      return;
+    }
+    // Uninstall drops the label's slot: its protocol claims and guest realm (§12.5).
+    shell.uninstall(key);
+    installedApps.delete(key);
+    unmountView(rec);
+    if (activeAppKey === key) showNoApp();
+    forgetApp(key);
+    renderAppList();
+  });
 }
 
 function renderOfferList() {

@@ -15,10 +15,13 @@
 /** Signals: `{ call }` (I'm in this call), `{ sdp }`, `{ candidate }`, `{ bye: true }`. */
 const encode = (msg) => new TextEncoder().encode(JSON.stringify(msg));
 
+/** ICE restarts tried on a failed connection before giving up on it. */
+const MAX_ICE_RESTARTS = 3;
+
 export class MediaCalls {
-  /** peerId → { pc, ready, polite, makingOffer, ignoreOffer, carrying }. `pc` is null until
-   *  the peer's ICE servers are known (`ready` settles then); `carrying` maps each of our
-   *  tracks to its transceiver. */
+  /** peerId → { pc, ready, polite, makingOffer, ignoreOffer, carrying, restarts }. `pc` is
+   *  null until the peer's ICE servers are known (`ready` settles then); `carrying` maps each
+   *  of our tracks to its transceiver; `restarts` counts ICE restarts since last connected. */
   #peers = new Map();
   /** Local tracks to publish: [{ track, stream }]. */
   #tracks = [];
@@ -171,7 +174,7 @@ export class MediaCalls {
       if (e.pc) this.#carryAll(e);
       return e;
     }
-    e = { pc: null, ready: null, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false, carrying: new Map() };
+    e = { pc: null, ready: null, polite: this.opts.myId > peerId, makingOffer: false, ignoreOffer: false, carrying: new Map(), restarts: 0 };
     this.#peers.set(peerId, e);
     const entry = e;
     e.ready = this.opts.iceServers(peerId).catch(() => []).then((iceServers) => {
@@ -196,7 +199,13 @@ export class MediaCalls {
     });
     pc.addEventListener("track", (ev) => this.opts.onTrack?.(peerId, ev.track));
     pc.addEventListener("connectionstatechange", () => {
-      if (pc.connectionState === "failed") this.#close(peerId);
+      if (pc.connectionState === "connected") e.restarts = 0;
+      if (pc.connectionState !== "failed") return;
+      // Restart ICE rather than closing: both ends keep their connection and renegotiate
+      // (perfect negotiation handles both restarting at once). Give up after a few tries,
+      // e.g. when no direct path exists and there's no TURN.
+      if (e.restarts++ < MAX_ICE_RESTARTS) pc.restartIce();
+      else this.#close(peerId);
     });
     this.#carryAll(e);
   }
