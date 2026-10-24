@@ -1,22 +1,14 @@
-// The shell app's guest: how one page talks to another (browser/shell-app.js). It follows
-// net.js, and holds the three claims its app.json lists, in that order, which is the order
-// the builder hands them to it in `APP.protocols`.
+// The shell boot bundle's guest (see browser/shell-app.js). It follows net.js, and gets its
+// three claims in `APP.protocols`, in app.json order.
 //
 // `handle` has two callers:
-//
-// - a peer's frame under any of the three, `[from 32][bytes …]`: answered with the bytes
-//   themselves, which is what the page's `onInbound` receives (seedkernel §12.10), with
-//   `from` and the claim beside them. The answer is the notification.
-// - the page's three ops, each `[to 32][bytes …]`, handed to `_net` under the protocol the
-//   op names. A `signal` and an `offer` wait for nothing. A `tell` waits for the peer's
-//   guest to answer it, and answers what the transport does: the invocation is deferred
-//   (seedkernel §12.3), so this realm is free for the next frame while it waits.
-//
-// The op names are browser/shell-app.js's `SHELL_OP_*`.
+// - a peer's frame, `[from 32][bytes…]`: answered with the bytes themselves, which reach the
+//   page through its `onInbound` (§12.10).
+// - the page's ops, `[to 32][bytes…]`: sent to `to` under the op's protocol. `tell` waits for
+//   the peer's answer; the invocation is deferred (§12.3), so the realm stays free meanwhile.
 
 const [SHELL_PROTO, CALL_PROTO, OFFER_PROTO] = APP.protocols;
-/** The two ops that send without waiting, by the protocol each sends under. Null-prototype,
- *  so `toString` is not one. */
+/** The fire-and-forget ops and their protocols. Null prototype, so `"toString" in SENDS` is false. */
 const SENDS = Object.assign(Object.create(null), { signal: CALL_PROTO, offer: OFFER_PROTO });
 
 async function handle(arg) {

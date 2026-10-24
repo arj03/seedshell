@@ -1,66 +1,47 @@
-// The wall around an app's view. A view is any author's page, and the sandbox the shell
-// loads it into (shell.js `mountView`) keeps it from this page: an opaque origin, with no
-// DOM of ours, no keys and no storage. It does not keep a view from the network. A blob:
-// document inherits the policy of the page that made it, and this page's policy has to let
-// the page itself open a WebSocket to whatever relay the user names; so a view could open
-// one to any server, and send it what it is shown, every message and the node's context.
+// Keeps an app's view off the network.
 //
-// A view is granted nothing. What an app reaches is what its GUEST reaches, which is in its
-// signed manifest and on its consent row (app-api.js `APP_GRANTS`), and a view's only way
-// out is the door to the shell. `guardView` holds a view to that, with two things it puts
-// into the view's page before the page is loaded:
+// The iframe sandbox (shell.js `mountView`) gives a view an opaque origin, which keeps it
+// away from the shell's DOM, keys and storage, but not from the network: a blob: document
+// inherits the shell page's CSP, which must allow WebSockets to any relay. A view is granted
+// nothing of its own (the app's reach is its guest's, per its manifest), so `guardView`
+// adds two things to the view's page before it loads:
 //
-//   a POLICY   of the view's own, ahead of everything else in it. Both policies apply, the
-//              page's and this one, so it can only take away: no request of any kind, no
-//              frame but an empty one, no form sent, no script but the prelude and what the
-//              prelude runs. It is two policies (`VIEW_POLICY`, `VIEW_SCRIPT_POLICY`),
-//              since one cannot say both which scripts run and that none names a file.
-//   a PRELUDE  the one script the policy lets the parser run, named by its hash. It takes
-//              WebRTC out of the realm, which is the one way onto the network no policy
-//              governs: a peer connection asks whatever STUN or TURN server its script
-//              names. (The `webrtc` directive that would stop it is one Chromium does not
-//              know, and logs as an error.) Then it runs the view's own scripts, in their
-//              places and in order.
+//   a policy   prepended to the head (`VIEW_POLICY`, `VIEW_SCRIPT_POLICY`). Policies stack,
+//              so this only restricts further: no requests, no frames, no form submission,
+//              and no scripts except the prelude and the scripts it runs.
+//   a prelude  the one script the parser may run (allowed by hash). It deletes
+//              RTCPeerConnection, since CSP can't stop WebRTC from contacting the STUN/TURN
+//              servers a script names (Chromium doesn't support the `webrtc` directive). It
+//              then runs the view's scripts in order.
 //
-// The view's scripts are held back for the prelude to run (`HELD`) rather than left for the
-// parser, and that is what makes taking WebRTC out a wall and not a courtesy. Under
-// 'strict-dynamic' a script runs only if the parser found it and it is the prelude, or if a
-// script already running made it. So in any document this policy reaches, the prelude runs
-// first: in the view, in a frame the view makes (a `srcdoc` one inherits the policy, and is
-// not stopped by `frame-src`), and in a blob the view navigates itself to. There is no
-// realm a view can get to with WebRTC still in it. A `javascript:` URL and an inline
-// handler (`onclick="…"`) are the parser's too, and do not run: a view listens with
-// `addEventListener`.
+// The view's scripts are "held" (given a non-executable type) so only the prelude can run
+// them. With 'strict-dynamic', a script runs only if it is the hashed prelude or was created
+// by a running script, so the prelude runs first in every document this policy reaches: the
+// view, a srcdoc frame it creates, or a blob it navigates to. Inline handlers (`onclick=`)
+// and `javascript:` URLs don't run; views use `addEventListener`.
 //
-// What is left is a hint: `<link rel="preconnect">` and `dns-prefetch` open a connection to,
-// or look up, a name the view chooses, and no policy stops either. Nothing is sent on it but
-// the name, and the name is the view's to choose: so a view can tell a server it names a
-// little at a time, and hears nothing back.
+// Known gap: `<link rel="preconnect">` and `dns-prefetch` aren't covered by CSP, so a view
+// can leak a little at a time through hostnames it chooses. It receives nothing back.
 //
-// Browser only: it parses the view with DOMParser, and hashes with WebCrypto.
+// Browser only (DOMParser, WebCrypto).
 
-/** The type a view's script carries while it is held for the prelude, and the attribute
- *  that keeps the type its author gave it. */
+/** The type given to held scripts, and the attribute that saves their original type. */
 const HELD = "application/x-view-script";
 const HELD_TYPE = "data-view-type";
 
-/** The script types a browser runs (HTML's "prepare the script element"): none given, a
- *  JavaScript MIME type, a module, an import map. Any other is a block of data, which the
- *  policy has nothing to say about, and is left as its author wrote it. */
+/** Script types a browser executes (per HTML's "prepare the script element"). Other types
+ *  are data blocks and are left alone. */
 const RUNS = new Set(["", "module", "importmap", "application/ecmascript", "application/javascript",
   "application/x-ecmascript", "application/x-javascript", "text/ecmascript", "text/javascript",
   "text/javascript1.0", "text/javascript1.1", "text/javascript1.2", "text/javascript1.3",
   "text/javascript1.4", "text/javascript1.5", "text/jscript", "text/livescript",
   "text/x-ecmascript", "text/x-javascript"]);
 
-/** The prelude. A realm it cannot take WebRTC out of runs none of the view's scripts.
+/** The prelude. It removes WebRTC (and bails out, running nothing, if it can't), then
+ *  re-creates each held script with its original type so it runs. The MutationObserver
+ *  fires at each script boundary during parsing, so scripts still run in document order.
  *
- *  A held script is put back as a script of the type its author gave it, made by this one
- *  and so allowed to run. The parser stops for the microtasks at each script's end, which is
- *  when the observer hears of it, so a script runs where it stood, before what follows it is
- *  parsed. Once the page is parsed there are no more to come.
- *
- *  Its text is what the policy names, so it holds nothing that ends a script element. */
+ *  The policy names this text by hash, and it must not contain `</script`. */
 const PRELUDE = `(() => {
   for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection"]) {
     delete globalThis[name];
@@ -87,12 +68,11 @@ const PRELUDE = `(() => {
 const preludeHash = btoa(String.fromCharCode(
   ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(PRELUDE)))));
 
-/** A view's policy. `default-src 'none'` is every request there is: fetch, XHR, WebSocket,
- *  WebTransport, a beacon, an image, a stylesheet, a font, a prefetch. What is given back is
- *  what a page needs to be a page and reaches nothing: its own inline styles, images and
- *  media it holds as `data:` or `blob:`, and fonts as `data:`. The page's own policy applies
- *  too, so what is given back here it has to allow as well (shell.html). A worker made from
- *  a blob inherits this policy, and has no WebRTC of its own. */
+/** The view's main policy. `default-src 'none'` blocks every request (fetch, XHR, WebSocket,
+ *  WebTransport, beacons, images, styles, fonts, prefetch). It allows back only what needs no
+ *  network: inline styles, `data:`/`blob:` images and media, `data:` fonts and blob workers
+ *  (which inherit this policy and have no WebRTC). shell.html's policy also applies, so it
+ *  must allow these too. */
 export const VIEW_POLICY = [
   "default-src 'none'",
   `script-src 'sha256-${preludeHash}' 'strict-dynamic' 'wasm-unsafe-eval'`,
@@ -107,25 +87,18 @@ export const VIEW_POLICY = [
   "form-action 'none'",
 ].join("; ");
 
-/** A second policy, for what the first cannot say. Under 'strict-dynamic' a script that is
- *  running may make one that names any file, and the first policy lets it: `import()` and a
- *  worker's `importScripts` likewise. The page's own policy would be all that stood in the
- *  way, and it has to let the page load its scripts from its own server, so a view could
- *  ask that server for anything, with what it is shown in the address. This one names no
- *  server, and a script has to pass both: so one a view makes runs if it carries its code,
- *  and loads nothing. `worker-src` is said again because a policy without it reads
- *  `script-src` for a worker, which here has no `blob:`. */
+/** A second policy. Under 'strict-dynamic', a running script may load a script from any
+ *  URL (also `import()` and `importScripts`), and shell.html's policy allows the page's own
+ *  server, so a view could leak data in a request URL there. This policy allows inline
+ *  script only; since a script must pass both policies, scripts a view creates can run but
+ *  can't load anything. `worker-src` is repeated because it would otherwise fall back to
+ *  this `script-src`, which has no `blob:`. */
 export const VIEW_SCRIPT_POLICY = "script-src 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob:";
 
-/** An app's view as the page the shell loads: the author's own, with the policy and the
- *  prelude first in its head, and each script the parser would have run held for the
- *  prelude. A script that names a file (`src`) is left as it is and refused by the policy,
- *  since there is nothing beside a view to load: the builder puts a view's scripts into its
- *  page (scripts/app-source.mjs `readView`).
- *
- *  The page is parsed here to find its scripts, in a document that runs none of them, and
- *  written out again. A script this misses is not one that gets out: the parser finds it
- *  where the policy refuses it. */
+/** Return the view's HTML with the policies and prelude prepended to its head, and every
+ *  executable inline script held for the prelude. Scripts with `src` are left for the policy
+ *  to refuse (the builder inlines a view's scripts; see scripts/app-source.mjs `readView`).
+ *  Fails safe: any script missed here is still blocked by the policy. */
 export function guardView(html) {
   const doc = new DOMParser().parseFromString(html, "text/html");
   for (const script of doc.querySelectorAll("script:not([src])")) {
@@ -135,12 +108,11 @@ export function guardView(html) {
     if (type !== null) script.setAttribute(HELD_TYPE, type);
     script.setAttribute("type", HELD);
   }
-  // The page is written out as UTF-8 (`mountView`), and says so before the prelude pushes
-  // the author's own word for it past where a browser looks.
+  // Declare UTF-8 first, since the prelude could push the author's charset meta past the
+  // point where browsers look for it.
   const charset = doc.createElement("meta");
   charset.setAttribute("charset", "utf-8");
-  // One element for each policy: a second in the same element would be read as part of
-  // the first.
+  // One meta per policy; two policies in one element would be parsed as one.
   const policies = [VIEW_POLICY, VIEW_SCRIPT_POLICY].map((content) => {
     const policy = doc.createElement("meta");
     policy.httpEquiv = "Content-Security-Policy";

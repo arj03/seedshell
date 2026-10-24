@@ -1,17 +1,9 @@
-// Copy seedkernel's built host into browser/vendor/ so a plain static server can
-// serve the shell with no bundler. The import map in shell.html points at these
-// files; nothing else in this repo reaches into node_modules.
+// Copy seedkernel's built host, its host blob and seedrelay's room client into
+// browser/vendor/, so a plain static server can serve the shell (shell.html's import map
+// points here).
 //
-// This is deliberately a dumb copy of `build-min` wholesale: platform.js and
-// bundle.js import their siblings and the `services/` tree by relative path, so the
-// whole tree has to arrive intact even though the shell itself names only a handful
-// of entry points. The minified tree is what seedstore's p2p.html vendors too —
-// same convention across both apps — with the readable `build/` as a fallback.
-//
-// Beside it goes seedkernel's host blob (build/host.skb): the realm engine every guest
-// runs on and the host's crypto, which the page fetches and hands to the browser platform
-// (host-blob.js, shell.js). The same blob the Node and native nodes run, so the page
-// carries no crypto or engine of its own.
+// The whole `build-min` tree is copied, since its modules import siblings by relative path.
+// Falls back to the readable `build/` if the minified one doesn't exist.
 
 import { cpSync, mkdirSync, existsSync, rmSync, readdirSync, statSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -20,13 +12,8 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
-// seedkernel is a sibling checkout by declaration: package.json pins
-// `file:../seedkernel/WASM`, and seedkernel is `private: true` and never published.
-// So name that path, the same way seedstore's build-browser-demo.mjs does. Resolving
-// it through Node instead would defend against install shapes the dependency spec has
-// already ruled out, and would do it by reaching for `seedkernel-wasm/package.json` —
-// a subpath that resolves only while seedkernel's `exports` map carries an entry
-// nothing else needs.
+// seedkernel is a sibling checkout (package.json pins `file:../seedkernel/WASM`), so use
+// that path directly.
 const pkgRoot = resolve(root, "..", "seedkernel", "WASM");
 if (!existsSync(pkgRoot)) {
   console.error(
@@ -36,9 +23,7 @@ if (!existsSync(pkgRoot)) {
   process.exit(2);
 }
 
-// The minified tree (build-min) is what seedkernel's own browser deployment
-// vendors too, and is ~half the size of the readable build; fall back to the
-// readable build when only that exists (a `npm run build:host` alone).
+// Prefer the minified tree; fall back to build/ if only `build:host` was run.
 const minDir = resolve(pkgRoot, "build-min");
 const rawDir = resolve(pkgRoot, "build");
 const hostSrc = existsSync(minDir) ? minDir : rawDir;
@@ -53,15 +38,9 @@ if (hostSrc === rawDir) {
   console.warn("note: vendoring the unminified host — run `npm run build:host:min` in seedkernel for the smaller build");
 }
 
-// ── staleness guard (same one seedstore's build-browser-demo.mjs runs) ──────
-// The browser runs the MINIFIED host; seedkernel's own Node tests run build/.
-// The two diverge silently when `build:host` (tsc) is re-run but `build:host:min`
-// (minify) is not — a real trap after switching branches, because seedkernel's tests
-// stay green against the fresh build/ while the shell vendors a stale build-min and runs
-// old code. Catch it here, at the last step before the browser: if any compiled
-// build/ .js is newer than the whole build-min tree, the minify step lagged.
-// Scoped to the host/ and services/ subtrees — minify covers exactly those, and build/
-// also holds asc fixture outputs (forwarder.*) that no tsc↔minify cycle touches.
+// Staleness guard: if build/ was recompiled but the minify step wasn't re-run, the browser
+// would get stale code while seedkernel's own tests (which use build/) still pass. Fail if
+// any .js under build/host or build/services is newer than its build-min counterpart.
 function newestJsMtime(dir) {
   let newest = 0;
   for (const name of readdirSync(dir)) {
@@ -92,15 +71,11 @@ const vendor = resolve(root, "browser/vendor");
 rmSync(vendor, { recursive: true, force: true });
 mkdirSync(vendor, { recursive: true });
 
-// The whole minified tree: host/ and services/ (host modules import ../services/* by
-// relative path) plus the top-level ws/forwarder entry files, unused by the shell but
-// part of the same tree.
+// Copy the whole tree (host modules import ../services/* by relative path).
 cpSync(hostSrc, resolve(vendor, "seedkernel"), { recursive: true });
 
-// The host blob: qjs.wasm, libsodium and ML-DSA-65 (manifest suite 0x02, §12.4), the same
-// bytes the Node and native nodes run, so the shell admits exactly the bundles they admit.
-// ML-KEM-768 is private content of the signed transport bundle; no loose browser artifact
-// is needed for it.
+// The host blob: qjs.wasm, libsodium and ML-DSA-65 (§12.4), the same bytes Node and native
+// nodes run, so the shell admits exactly the bundles they admit.
 {
   const src = resolve(rawDir, "host.skb");
   if (!existsSync(src)) {
@@ -110,10 +85,7 @@ cpSync(hostSrc, resolve(vendor, "seedkernel"), { recursive: true });
   copyFileSync(src, resolve(vendor, "host.skb"));
 }
 
-// ── vendor seedrelay's room client ──────────────────────────────────────────
-// Rooms are the app's: the page meets peers in a relay room itself and hands them to the
-// transport, which knows only keys and relays. seedrelay is a sibling checkout, like
-// seedkernel (package.json pins `file:../seedrelay`).
+// ── seedrelay's room client (sibling checkout, `file:../seedrelay`) ──────────
 const roomsSrc = resolve(root, "..", "seedrelay", "rooms.mjs");
 if (!existsSync(roomsSrc)) {
   console.error(`seedrelay not found at ${dirname(roomsSrc)}.\n  check it out beside this repo`);

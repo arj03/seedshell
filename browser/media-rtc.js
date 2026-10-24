@@ -1,40 +1,34 @@
-// Live audio/video, on peer connections the page owns.
+// Live audio/video on peer connections the page owns.
 //
-// seedkernel's WebRTC seam holds the TRANSPORT's peer connections and passes their
-// negotiation through as bytes (seedkernel §12.7); media is not the runtime's business, so
-// a call opens its own `RTCPeerConnection` per peer, beside the transport's. Its signaling
-// rides the node's authenticated channel — the shell app's `call/v1` protocol
-// (shell-app.js) — so a call needs no relay once the peers are linked, and nobody on the
-// relay can inject into one.
+// seedkernel's WebRTC seam only holds the transport's connections (§12.7), so a call opens
+// its own RTCPeerConnection per peer. Signaling rides the node's authenticated channel via
+// the shell app's call/v1 protocol (shell-app.js), so no relay is needed once peers are
+// linked and nothing on the relay can inject into a call.
 //
-// A call is entered, not received. A node in a call says so to that call's peers (`{ call
-// }`), and that word is all a peer gets of it: a connection is opened, and a description
-// answered, only between two nodes that have each said they are in the same call. So
-// nothing of a caller's reaches a peer that has not accepted, and nothing of that peer's
-// leaves it.
+// Calls are opt-in on both ends: a node in a call tells that call's peers (`{ call }`), and a
+// connection is only opened between two nodes that have both said they're in the same call.
+// Nothing is sent to or received from a peer that hasn't accepted.
 //
-// Negotiation is the W3C "perfect negotiation" pattern: either side may offer (adding a
-// track does), and on a collision the polite side — the larger key, by the same rule the
-// transport uses for who offers — rolls its own offer back.
+// Negotiation uses the W3C "perfect negotiation" pattern. On a collision, the polite side
+// (the larger key, matching the transport's rule) rolls back its offer.
 
-/** One signal: `{ call }` (in a call, and which), `{ sdp }` (a description), `{ candidate }`,
- *  or `{ bye: true }` (hang-up). */
+/** Signals: `{ call }` (I'm in this call), `{ sdp }`, `{ candidate }`, `{ bye: true }`. */
 const encode = (msg) => new TextEncoder().encode(JSON.stringify(msg));
 
 export class MediaCalls {
-  /** peerId → { pc, ready, polite, makingOffer, ignoreOffer, carrying }: `pc` is null until
-   *  the ICE servers toward the peer are known, which it is made with, and `ready` settles
-   *  then; `carrying` is the transceiver each of our tracks is sent on */
+  /** peerId → { pc, ready, polite, makingOffer, ignoreOffer, carrying }. `pc` is null until
+   *  the peer's ICE servers are known (`ready` settles then); `carrying` maps each of our
+   *  tracks to its transceiver. */
   #peers = new Map();
-  /** Local tracks to publish, [{ track, stream }]; empty while nothing of ours is on. */
+  /** Local tracks to publish: [{ track, stream }]. */
   #tracks = [];
-  /** The call we are in, by the name both ends of it say, and who of a set of peers it is
-   *  with (`start`); null out of a call. */
+  /** The call we're in (its shared name) and the filter picking its peers (`start`); null
+   *  when not in a call. */
   #call = null;
   #among = null;
-  /** The peers told we are in it. */
+  /** Peers we've told we're in the call. */
   #rung = new Set();
-  /** peerId → the call it says it is in, for every peer in one. */
+  /** peerId → the call that peer says it's in. */
   #callers = new Map();
 
   /**
@@ -49,30 +43,28 @@ export class MediaCalls {
    */
   constructor(opts) { this.opts = opts; }
 
-  /** peerId → the call it says it is in, for every peer in one. */
+  /** peerId → the call that peer says it's in (a copy). */
   get callers() { return new Map(this.#callers); }
 
-  /** How many peers are in the call with us. */
+  /** Number of peers we have a media connection with. */
   get size() { return this.#peers.size; }
 
-  /** Be in the call named `call`: with those `among` picks out of a list of peers, of the
-   *  `linked` now and of any that links later (`sync`). Each is told, and the ones in it
-   *  too are connected. */
+  /** Enter call `call`. `among(peers)` picks its participants from the linked peers, now
+   *  and as they change (`sync`). Each is told; those also in the call get connected. */
   start(call, among, linked) {
     this.#call = call;
     this.#among = among;
     this.sync(linked);
   }
 
-  /** Publish a track, beside any already published: to every peer in the call, and to any
-   *  that enters it later. */
+  /** Publish a track to everyone in the call, including later joiners. */
   publish(track, stream) {
     this.#tracks.push({ track, stream });
     for (const p of this.#peers.keys()) this.#ensure(p);
   }
 
-  /** Stop publishing one track, the rest going on. Its transceiver stays, sending nothing,
-   *  which mutes the track at the far end. */
+  /** Stop publishing a track. Its transceiver is kept but sends nothing, which mutes the
+   *  track at the far end. */
   unpublish(track) {
     this.#tracks = this.#tracks.filter((t) => t.track !== track);
     for (const e of this.#peers.values()) {
@@ -86,17 +78,17 @@ export class MediaCalls {
     }
   }
 
-  /** Follow the linked peers. A caller that is gone calls no more; and in a call, a peer of
-   *  it that links is told of it, one in it too is connected, and one out of it dropped. */
+  /** Follow the linked peers: forget callers that went away, and while in a call, tell new
+   *  participants, connect those also in it, and drop those no longer in it. */
   sync(linked) {
     let changed = false;
     for (const p of [...this.#callers.keys()]) {
-      // The page is told of a link before anything arrives over it, so a caller is linked.
+      // A link is always reported before anything arrives on it, so callers are linked.
       if (!linked.includes(p)) { this.#callers.delete(p); changed = true; }
     }
     if (this.#call !== null) {
       const peers = new Set(this.#among(linked));
-      // A peer that dropped and came back has forgotten what it was told, and is told again.
+      // A peer that dropped and came back must be told again.
       for (const p of [...this.#rung]) if (!peers.has(p)) this.#rung.delete(p);
       for (const p of peers) {
         if (!this.#rung.has(p)) {
@@ -110,8 +102,7 @@ export class MediaCalls {
     if (changed) this.opts.onCallers?.();
   }
 
-  /** Hang up: tell every peer told of the call, close every media connection, publish
-   *  nothing. */
+  /** Hang up: say bye, close every media connection, stop publishing. */
   end() {
     this.#call = this.#among = null;
     this.#tracks = [];
@@ -120,14 +111,14 @@ export class MediaCalls {
     for (const p of [...this.#peers.keys()]) this.#close(p);
   }
 
-  /** Kick an ICE restart on every call, after a network change. */
+  /** Restart ICE on every connection, e.g. after a network change. */
   restartAllIce() {
     for (const e of this.#peers.values()) {
       try { e.pc?.restartIce(); } catch { /* nothing to restart */ }
     }
   }
 
-  /** A peer's signal, already attributed by the channel it arrived on. */
+  /** Handle a signal from `peerId` (authenticated by the channel). */
   async onSignal(peerId, bytes) {
     let msg;
     try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
@@ -142,12 +133,10 @@ export class MediaCalls {
       this.opts.onCallers?.();
       return;
     }
-    // A description or a candidate is heard only from a peer in the call with us. One whose
-    // call we have not entered has no connection here to offer to.
+    // SDP and candidates are accepted only from peers in our call.
     if (!this.#with(peerId)) return;
     const e = this.#ensure(peerId);
-    // One that comes before the connection is made waits for it, and those that wait resume
-    // in the order they came.
+    // Wait for the connection to exist; waiters resume in arrival order.
     await e.ready;
     if (this.#peers.get(peerId) !== e) return;   // closed meanwhile
     try {
@@ -167,16 +156,15 @@ export class MediaCalls {
     } catch { /* a stale signal after a rollback, or a peer that went away */ }
   }
 
-  /** Whether a peer is in the call with us: we are in one, it is a peer of that call, and
-   *  it has said it is in the same. */
+  /** Whether `peerId` is in our call: we're in one, it's a participant, and it says it's in
+   *  the same call. */
   #with(peerId) {
     return this.#call !== null && this.#callers.get(peerId) === this.#call &&
       this.#among([peerId]).length > 0;
   }
 
-  /** The entry for a peer in the call with us, made if there is none. Its connection is made
-   *  once the transport has named the ICE servers toward the peer (`iceServers`), so it asks
-   *  the STUN the transport's own do from the start, and negotiates as nothing waits. */
+  /** Get or create the entry for a peer in our call. The connection is created once the
+   *  peer's ICE servers are known, so it uses the same STUN as the transport. */
   #ensure(peerId) {
     let e = this.#peers.get(peerId);
     if (e) {
@@ -192,7 +180,7 @@ export class MediaCalls {
     return e;
   }
 
-  /** Make a peer's connection, and publish on it what we carry. */
+  /** Create the peer's connection and publish our tracks on it. */
   #open(peerId, e, iceServers) {
     const pc = e.pc = new RTCPeerConnection({ iceServers });
     pc.addEventListener("icecandidate", (ev) => {
@@ -213,7 +201,7 @@ export class MediaCalls {
     this.#carryAll(e);
   }
 
-  /** Publish what we carry on a connection that does not carry it yet. */
+  /** Publish any of our tracks the connection doesn't carry yet. */
   #carryAll(e) {
     for (const { track, stream } of this.#tracks) {
       if (!e.carrying.has(track)) {
@@ -222,10 +210,9 @@ export class MediaCalls {
     }
   }
 
-  /** Send a track on a connection, answering the transceiver it goes on. One that only
-   *  receives takes it: the peer's own, or one a track of ours was taken off (`unpublish`).
-   *  `addTrack` would pass over the latter and add a media section each time a camera is
-   *  turned back on. */
+  /** Send a track, returning its transceiver. Reuses an idle recvonly transceiver of the
+   *  same kind (the peer's, or one we unpublished from) rather than `addTrack`, which would
+   *  add a new media section every time the camera is turned back on. */
   #carry(e, track, stream) {
     const taken = new Set(e.carrying.values());
     const idle = e.pc.getTransceivers().find((t) =>

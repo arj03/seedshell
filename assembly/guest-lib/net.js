@@ -1,12 +1,9 @@
-// What any guest that reaches the network writes the same way: the transport's `send`, and
-// keys as hex. Who is linked a guest reads off the node's context (context.js), which the
-// shell tells it each time that changes. The offline builder
-// (scripts/build-app-bundle.mjs) puts it in front of each guest that names it, after
-// seedkernel's op-frame, which gives `callerOf`, `readOp`, `writeOp`, `utf8Encode` and
-// `utf8Decode`. It is guest SOURCE, signed into each bundle, not a module anything imports,
-// so the transport's argument layout is written once and every bundle still carries it.
+// Shared guest source for any guest that uses the network: the transport's `send`, and hex
+// helpers. The builder concatenates it after seedkernel's op-frame prelude (which provides
+// `callerOf`, `readOp`, `writeOp`, `utf8Encode` and `utf8Decode`), so it is signed into each
+// bundle that lists it rather than imported.
 
-/** The local service name the transport serves (browser/app-api.js `NET_PROTO`). */
+/** The transport's service name (browser/app-api.js `NET_PROTO`). */
 const NET = "_net";
 
 const HEX = "0123456789abcdef";
@@ -21,20 +18,13 @@ function fromHex(h) {
   return out;
 }
 
-/** Hand `payload` to the peer `to` (its 32-byte key) under the protocol id `proto`.
+/** Send `payload` to peer `to` (32-byte key) under protocol `proto`.
  *
- *  The transport's `send` op takes `[noReply u8]` then `[to][proto][payload]` as blobs,
- *  each `[len u32][bytes]`; the envelope in front is `writeOp`'s, so a guest writes the
- *  arguments and never the framing. The host prepends this app's own id as the caller, so
- *  the transport can tell an app's request from the platform's own events.
- *
- *  `noReply` is 1 unless `reply` is asked for: the frame is handed to the wire and the call
- *  answers `[1]` without waiting for the far end. With `reply` it waits for what the far
- *  end's guest answers the frame, and answers `[1][that]`, or `[0]` for a peer that could
- *  not be reached or gave no answer. There is no deadline field, because the host carries
- *  the invocation's own remaining segment across every handoff (seedkernel §12.3). The
- *  transport dials a peer it has an address for, and a peer it cannot reach is not
- *  reached. */
+ *  The transport's `send` op takes `[noReply u8]`, then `to`, `proto` and `payload` as
+ *  `[len u32][bytes]` blobs. Without `reply` it answers `[1]` once the frame is handed to
+ *  the wire. With `reply` it waits for the far guest's answer: `[1][answer]`, or `[0]` if
+ *  the peer was unreachable or did not answer. No deadline is passed; the host carries the
+ *  invocation's own deadline across the call (§12.3). */
 function netSend(to, proto, payload, reply = false) {
   const args = new Uint8Array(1 + 4 + 32 + 4 + proto.length + 4 + payload.length);
   let o = 0;

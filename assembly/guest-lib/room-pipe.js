@@ -1,28 +1,21 @@
-// A guest, whole: a pipe scoped to a room, for an app whose state lives in its view. It
-// follows net.js and context.js in an app.json's `guest` list, and an app that needs no
-// more than this names no guest at all: the builder gives it these three, as it does hello
-// (scripts/app-source.mjs). What is left to a guest here is the part a view cannot be
-// trusted with or cannot do: who a frame goes to, and whether a peer's frame is from
-// someone in the room it names. The view's half is assembly/view-lib/app.js (`cast`,
-// `tell`, `onFrame`).
+// A complete guest for apps whose state lives in the view: a pipe scoped to rooms. The guest
+// decides what the view can't be trusted to: who a frame goes to, and whether an incoming
+// frame comes from a member of the room it names. An app that names no guest gets this one
+// (after net.js and context.js). The view side is assembly/view-lib/app.js.
 //
-// An app that needs more puts a guest of its own behind this file and sets `guest.peer` or
-// `guest.view` again (context.js), with `pipePeer` and `pipeView` for the rest: jam's hashes
-// a block of audio on its way in.
+// Apps needing more can list their own guest after this file and wrap `pipePeer` /
+// `pipeView`, as jam does.
 
-/** The wire protocol the pipe's frames travel under (§12.10): the first id in app.json
- *  `protocols`, which the builder writes into the guest's config (scripts/app-source.mjs),
- *  since a guest is handed its config and not its manifest's claims. */
+/** The protocol pipe frames use: the app's first claimed protocol. */
 const PIPE_PROTO = APP.protocols[0];
 
-/** A frame on the wire is `[room 32][body]`, `room` the room's id on the relay. The pipe
- *  reads the room of every frame and the body of none: that is the view's vocabulary.
+/** A wire frame is `[room 32][body]`. The pipe reads only the room; the body is the view's.
  *
- *  What a view asks, as the `ui` op's bytes: `[ask u8][..]`. */
+ *  A view's call is `[ask u8][…]`: */
 const ASK_CAST = 1;      // [frame]          to every linked member of the frame's room
 const ASK_TELL = 2;      // [to 32][frame]   to one member of the frame's room
 
-/** A render, for the view. Type 0 is the node's context (context.js). */
+/** Renders for the view. Type 0 is the context (context.js). */
 const RENDER_FRAME = 1;  // [from 32][frame]   a peer's frame
 
 function concat(parts) {
@@ -34,27 +27,24 @@ function concat(parts) {
   return out;
 }
 
-/** The room a frame names, in hex. */
+/** A frame's room id, in hex. */
 function roomOf(frame) {
   return toHex(frame.subarray(0, 32));
 }
 
-/** Whether a peer's frame is from someone the relay lists in the room it names. The
- *  decision is made here, on the receiving side, whatever the sender's guest chose to send. */
+/** Whether a frame's sender is a member of the room it names. Checked on receipt, whatever
+ *  the sender's guest did. */
 function fromMember(caller, frame) {
   return frame.length >= 32 && inRoom(roomOf(frame), toHex(caller));
 }
 
-/** A PEER's frame is passed to the view when it is from a member of its room, with the
- *  sender the channel authenticated in front. */
+/** Pass a member's frame to the view as `[1][from 32][frame]`; drop anyone else's. */
 function pipePeer(caller, frame) {
   return fromMember(caller, frame) ? concat([[RENDER_FRAME], caller, frame]) : EMPTY;
 }
 
-/** An ask from the VIEW. A frame it casts goes to the linked members of its room, and one
- *  it tells goes to a single member. Both are fire-and-forget, and neither is answered with
- *  anything: the view has already applied what it sent. A peer that cannot be reached is
- *  not reached, and the rest still are. */
+/** A call from the view: cast to every linked member of the frame's room, or tell one
+ *  member. Fire-and-forget; send failures to individual peers are ignored. */
 async function pipeView(ask) {
   const rest = ask.subarray(1);
   if (ask[0] === ASK_CAST && rest.length >= 32) {

@@ -1,26 +1,18 @@
-// The shell with no page: a node that hosts one app from a console, as browser/shell.js
-// hosts several from a tab. It owns what that shell owns, less what only a person at a page
-// has a use for: this node's identity and nick, the relay, its rooms and who is in them,
-// and the links to them (browser/peers.js, which the page follows its peers through too).
-// It has no contacts, takes no offers and holds no calls.
+// The headless shell: a node that hosts one app from a console, as browser/shell.js hosts
+// several in a tab. It has an identity, a nick, a relay and rooms (browser/peers.js), but no
+// contacts, offers or calls.
 //
-// The app is a signed bundle like any other, admitted because whoever started this node
-// named it, which is what dropping its file on the page says. Its guest is driven through
-// the same two ops (browser/app-api.js). What stands where a view would is a HEAD: plain
-// script this shell runs in the order given, as a page runs a view's, behind the very door
-// a view is given, assembly/view-lib/app.js. That file runs here as it is, with a `window`
-// whose parent is this shell: what it posts is handled as the page handles a view's, and
-// what this shell sends it arrives as a message from its parent. So a head has `app`,
-// `toHex`, `fromHex` and `concat` exactly as a view has them.
+// The app is a signed bundle, admitted because whoever started the node named it. Its guest
+// is driven through the same two ops as in the browser (browser/app-api.js). In place of a
+// view it has a "head": plain scripts run in order behind the same interface a view gets,
+// assembly/view-lib/app.js, which runs unchanged with a `window` whose parent is this
+// shell. So a head has `app`, `toHex`, `fromHex` and `concat` just like a view.
 //
-// A head is not part of the bundle and is not confined: it is this node's own program, and
-// reaches whatever it is handed here beside the door (`grants`), which is how the radio's
-// comes by a directory of music. What it sends still leaves through the app's guest, under
-// the protocols the bundle claims.
+// A head isn't part of the bundle and isn't confined: it's this node's own code, and gets
+// whatever is passed in `grants` (the radio gets a music directory). Anything it sends still
+// goes out through the app's guest, under the bundle's protocols.
 //
-// Node has no WebRTC of its own, so every link of this node's stays on the relay, which
-// forwards its encrypted bytes (seedkernel §12.7). It dials a relay with the platform's
-// WebSocket, as the page does: Node 22 or later.
+// Node has no WebRTC, so all links stay relayed (§12.7). Needs Node 22+ for WebSocket.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -34,39 +26,35 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 
 import { APP_OP_CONTEXT, APP_OP_UI, MAX_QUEUED_RENDERS, admitGate, appFacts, bundleDigest, toHex, fromHex } from "../browser/app-api.js";
 import { Peers } from "../browser/peers.js";
-// How one shell talks to another, whichever kind each is: the boot bundle the page pins,
-// pinned here the same way. This node says what it is called, and hears what others are.
+// The shell boot bundle, pinned as in the browser: used here to exchange nicks.
 import { SHELL_PROTO, SHELL_OP_TELL } from "../browser/shell-app.js";
 import { shellBundleBytes, SHELL_AUTHOR_HEX, SHELL_APP } from "../browser/shell-bundle.js";
 
 export { toHex, fromHex };
 
-/** The door a view is given, which a head is given too. */
+/** The view interface, which heads use too. */
 const VIEW_LIB = join(dirname(fileURLToPath(import.meta.url)), "../assembly/view-lib/app.js");
 
-/** Run a node that hosts the app in `bundle` (a .skb's bytes), with `head` in front of it:
- *  the paths of its scripts, in order, and `grants`, what they are handed beside the door.
- *  The node is `identity` and calls itself `nick`. It registers on `relay`
- *  (`ws[s]://host[:port]`, with `relaySecret` for a private one) and stays in `rooms` there.
- *  `say` is told what a person watching would want to know. Answers the node's key in hex,
- *  and `close`. */
+/** Run a node hosting the app in `bundle` (.skb bytes). `head` lists the head's script
+ *  paths in order; `grants` are extra globals for it. The node uses `identity` and `nick`,
+ *  registers on `relay` (`ws[s]://host[:port]`, `relaySecret` if private) and joins `rooms`.
+ *  `say` receives status messages. Returns `{ key, close }`. */
 export async function hostApp({ sodium, identity, nick = "", relay, relaySecret = null, rooms, bundle, head, grants = {}, say = console.log }) {
   const digest = (bytes) => genesisHash(sodium, bytes);
   const short = (key) => key.slice(0, 8);
 
-  // Nothing of the transport's word is acted on until the app stands, and the relay's state
-  // is not said while the first join is under way, which reads as a relay that dropped.
+  // Ignore transport status until the app is installed, and don't report relay state during
+  // the first join (it would look like a dropped relay).
   let standing = false;
   let joining = true;
   const sayRelay = () => say(peers.relayState === 1 ? `on the relay at ${relay}` : peers.relayState === 2 ? `the relay at ${relay} is unreachable; retrying` : "on no relay");
-  // A nick is printed without control characters, which a terminal acts on.
+  // Strip control characters from nicks before printing them to a terminal.
   const label = (key) => {
     const called = ((key === peers.me ? peers.nick : peers.nicks.get(key)) ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
     return called ? `${called} (${short(key)})` : short(key);
   };
 
-  // The relay's state and the linked peers (seedkernel §12.6): every link of this node's
-  // is relayed, so how each is reached is not said.
+  // Relay state and linked peers (§12.6). All links here are relayed, so that isn't reported.
   function onStatus(status) {
     const relayWas = peers.relayState, linkedWas = [...peers.linked.keys()];
     peers.status(status);
@@ -76,12 +64,11 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     for (const key of linkedWas) if (!peers.linked.has(key)) say(`${label(key)} is gone`);
   }
 
-  // The consent gate is the page's (`admitGate`): the shell app by its pin, and the one app
-  // whoever runs this node named.
+  // Same gate as the page: the shell app by pin, plus a consent for the one named app.
   const consents = new Set();
   const { shell } = await bootShell({
     sodium, identity,
-    // A room keeps its members linked, so links do not idle out (shell.js).
+    // Never idle out links (rooms keep members linked).
     transport: { channels: new WsNetwork(), onStatus: (s) => onStatus(s), config: { linkIdleTimeoutMs: 0 } },
     admit: admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], consents, digest),
   });
@@ -95,9 +82,8 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
   });
   peers.setNick(nick);
 
-  // What a peer's shell tells this one about itself rides shell/v1: its nick is kept, and
-  // that it made this node a contact is not this node's business. A call's signals and an
-  // offer, which ride the same app's other claims, are for a node that can hold one.
+  // From shell/v1, keep peers' nicks. Contact notices, call signals and offers don't apply
+  // to a headless node.
   const shellApp = await shell.install(shellBundleBytes(), {
     onInbound: (claim, from, answer) => {
       if (claim !== SHELL_PROTO || answer.length === 0) return;
@@ -115,8 +101,8 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
   consents.add(toHex(bundleDigest(verified, digest)));
   const guest = await shell.install(bundle, { onInbound: (claim, from, answer) => render(answer) });
 
-  // The head's `window`: its parent is this shell, and what this shell says reaches the
-  // listener view-lib/app.js adds, as from that parent.
+  // The head's `window`. Its parent is this shell: what the head posts goes to `fromHead`,
+  // and `toHead` delivers messages to its listeners as if from the parent.
   const listeners = [];
   const parent = { postMessage: (msg) => queueMicrotask(() => fromHead(msg)) };
   const toHead = (msg) => {
@@ -129,8 +115,8 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
 
   let ready = false;
   const queued = [];
-  /** Hand the head what its guest answered, to a peer's frame or to the context. One that
-   *  comes before the head is ready is held, but for a context, which it is told afresh. */
+  /** Deliver a guest's render to the head. Before it's ready, renders are queued, except
+   *  context renders, since it gets a fresh context on ready. */
   function render(payload, isContext = false) {
     if (payload.length === 0) return;
     if (ready) { toHead({ type: "render", payload }); return; }
@@ -139,7 +125,7 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     if (queued.length > MAX_QUEUED_RENDERS) queued.shift();
   }
 
-  /** Tell the guest the context if it has changed, and hand the head its answer. */
+  /** Send the guest the context if it changed, and pass the answer to the head. */
   let told = null;
   async function tellContext() {
     const json = peers.context();
@@ -149,9 +135,8 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     catch (err) { say(`${facts.name}: ${err.message}`); }
   }
 
-  /** What the head says, as the page hears a view (shell.js): `ready`, and `call`, bytes for
-   *  its guest, answered under the id it gave. A node with no contacts and no calls has
-   *  nothing to do with a `conv` or a `contact`. */
+  /** Handle a message from the head, as the page handles a view's: `ready`, and `call`
+   *  (answered under its id). `conv` and `contact` don't apply here. */
   function fromHead(msg) {
     if (msg?.type === "ready") {
       ready = true;
@@ -164,8 +149,8 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     }
   }
 
-  // The head's scripts share one scope, which is this process's, as a page's share the
-  // page's: so a node runs one head.
+  // The head's scripts share this process's global scope, as a page's scripts share the
+  // page's, so a process runs one head.
   Object.assign(globalThis, { window, ...grants });
   for (const path of [VIEW_LIB, ...head]) {
     try { runInThisContext(readFileSync(path, "utf8"), { filename: path }); }

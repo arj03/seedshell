@@ -1,110 +1,95 @@
-// Who a shell is linked to, and why: the relay it is on, the rooms it is in and who the relay
-// says is in each, its contacts, and what each peer calls itself. The page (shell.js) and
-// the shell with no page (node/shell.mjs) follow their peers through this one class, and
-// draw, keep and tell what they each do with it around it. Nothing here touches a page.
+// Who a shell is linked to, and why: the relay, the rooms and their members, contacts and
+// nicks. Used by both the page (shell.js) and the headless shell (node/shell.mjs); nothing
+// here touches the DOM.
 //
-// Links are the TRANSPORT GUEST's own. What a shell tells it, a relay to register on or a
-// peer's address, goes through `shell.call`, the host's door into a co-resident guest's
-// `services` claim (seedkernel §12.10), composed with seedkernel's own `OpArgs`, so the
-// argument writer and the transport's reader move in one artifact. What it tells a shell
-// comes the other way, as `onStatus` (`status` here): the relay's state, and who is linked
-// and how each is reached.
+// The transport guest owns the actual links. We send it ops through `shell.call` (§12.10),
+// encoded with seedkernel's `OpArgs`, and it reports back via `onStatus` (`status` here).
 //
-// Rooms are a shell's, not the transport's: it meets peers in a relay room with seedrelay's
-// room client and hands their keys to the transport, which knows only keys and the relays
-// that reach them. Two ways to be linked to a peer, and one gate:
+// Rooms belong to the shell, not the transport: we meet peers with seedrelay's room client
+// and hand their keys to the transport. There are two ways to be linked to a peer:
 //
-//   A ROOM has no secret. Joining one is agreeing to be linked to everyone in it, and a
-//   shell may be in several at once. The transport is told who the room-mates are
-//   (`welcome`), and answers their calls whether or not they hold the contact secret.
+//   room      no secret. Joining means agreeing to link with every member. We can be in
+//             several. Room-mates are "welcomed", so they can call us without our secret.
+//   contact   a single peer, by key, linked regardless of rooms. Calling it requires its
+//             contact secret, if it has one.
 //
-//   A CONTACT is one peer, by key, linked whatever room either is in: a direct connection.
-//   Calling a contact takes its contact secret, if it has one.
-//
-//   The CONTACT SECRET is a node's own (seedkernel §12.6.3): 32 bytes a caller must present
-//   to be answered at all, unless it is a room-mate. None, and anyone may call.
+// The contact secret (§12.6.3) is 32 bytes that a caller who isn't a room-mate must present
+// to be answered at all. With none set, anyone can call.
 
 import { OpArgs } from "seedkernel-wasm/op-frame";
 import { roomClient, roomId } from "seedrelay/rooms";
 import { NET_PROTO, contextJson, toHex, fromHex } from "./app-api.js";
 
-/** The longest nick kept, a peer's or this node's. */
+/** Maximum nick length, ours or a peer's. */
 export const MAX_NICK = 32;
 
-/** Room names stay URL-safe identifier characters, length 1..128, so they read cleanly in
- *  the relay URL and room links; the relay itself sees only a hash of the name. */
+/** Valid room names: URL-safe, 1–128 chars. The relay only ever sees a hash of the name. */
 export const ROOM_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
-/** A room's name as people say it: without the random suffix "Random" gives one. */
+/** A room name for display, without the random suffix the "Random" button adds. */
 export const friendlyRoom = (name) => name.replace(/-[0-9a-f]{32}$/, "") || name;
 
-/** How long a dial waits for its peer to link before it is told there was no answer. The
- *  transport answers sooner for a peer that cannot be reached, and settles within the
- *  realm's own deadline whatever is asked (seedkernel §12.3). */
+/** How long a dial waits for a link before giving up. The transport may answer sooner. */
 const DIAL_MS = 10_000;
 
 const EMPTY = new Uint8Array(0);
 
 export class Peers {
   /**
-   * `shell` is the node's, `identity` its keypair and `sodium` the crypto that signs a room
-   * client's word with it. `tell(key, bytes)` tells a peer's shell something under shell/v1,
-   * and answers whether it got it (the shell boot bundle's `tell`). `changed` is called each
-   * time what a shell shows of its peers may have changed; `onRooms(renamed)` when who is in
-   * its rooms has, `renamed` when which rooms they are has too; and `onRefused(name)` for a
-   * room the relay turned it away from, which is left.
+   * `shell` is the node, `identity` its keypair, `sodium` the crypto used to sign room-client
+   * messages. `tell(key, bytes)` sends a shell/v1 notice and resolves to whether the peer's
+   * shell got it. Callbacks: `changed()` whenever peer state may have changed;
+   * `onRooms(renamed)` when room membership changed (`renamed` if the set of rooms did too);
+   * `onRefused(name)` when the relay refused a room, which is then left.
    */
   constructor({ shell, identity, sodium, tell, changed = () => {}, onRooms = () => {}, onRefused = () => {} }) {
     Object.assign(this, { shell, identity, sodium, tell, changed, onRooms, onRefused });
     this.me = toHex(identity.publicKey);
-    /** What this node calls itself, or "" for none. */
+    /** This node's nick, or "". */
     this.nick = "";
-    /** The rooms this shell is in, by name: `id` is the room's id on the relay, in hex, and
-     *  `members` the keys the room client last heard are in it. */
+    /** Joined rooms by name: `{ id, members }`, with the relay room id in hex and the
+     *  member keys the room client last reported. */
     this.rooms = new Map();
-    /** The contacts, by key in hex, each with its contact secret or null. */
+    /** Contacts: key hex → contact secret, or null. */
     this.contacts = new Map();
-    /** Everyone this shell wants a link to, by key in hex: its room-mates and its contacts,
-     *  each with how the call to it stands (`dial`). */
+    /** Peers we want linked (room-mates and contacts): key hex → dial state (`dial`). */
     this.wanted = new Map();
-    /** What each peer calls itself, by key in hex: a peer's own word for itself. */
+    /** Peer nicks: key hex → nick (self-chosen, unverified). */
     this.nicks = new Map();
-    /** The relay this shell is on: its origin, its secret if it is private, and the room
-     *  client there. null while it is on none. */
+    /** `{ origin, relaySecret, client }` for the current relay, or null. */
     this.relay = null;
-    /** The relay's state as the transport last said it: 0 none, 1 registered, 2 redialing. */
+    /** Relay state from the transport: 0 none, 1 registered, 2 redialing. */
     this.relayState = 0;
-    /** The linked peers as the transport last told them, by key in hex, each with whether
-     *  its link is direct (seedkernel §12.7). */
+    /** Linked peers from the transport: key hex → whether the link is direct WebRTC. */
     this.linked = new Map();
-    /** The linked peers whose shell has heard this node's nick. Only ever narrowed to who is
-     *  linked, so a peer that dropped and came back, and has forgotten, is told again. */
+    /** Linked peers that have been sent our nick. Pruned to the linked set, so a peer that
+     *  reconnects is told again. */
     this.nickTold = new Set();
   }
 
-  /** One op of the transport's, and its answer. */
+  /** Call a transport op. */
   net(op) { return this.shell.call(NET_PROTO, op.build()); }
 
-  /** One op of the transport's, when there is nothing to do about one it refuses. */
+  /** Call a transport op, ignoring failure. */
   netOp(op) { return this.net(op).catch(() => {}); }
 
-  /** What a peer is shown as: the nick it told this shell, or the start of its key. */
+  /** Display name: the peer's nick, or the start of its key. */
   label(key) { return this.nicks.get(key) ?? key.slice(0, 8); }
 
-  /** The joined room with this id, as [name, room], or undefined. */
+  /** The joined room with this id, as `[name, room]`, or undefined. */
   roomById(id) { return [...this.rooms].find(([, r]) => r.id === id); }
 
-  /** The names of the joined rooms `key` is in. */
+  /** Names of the joined rooms `key` is in. */
   roomsOf(key) { return [...this.rooms].filter(([, r]) => r.members.has(key)).map(([name]) => name); }
 
-  /** Everyone in a room with this node. */
+  /** Everyone in any of our rooms. */
   mates() {
     const mates = new Set();
     for (const r of this.rooms.values()) for (const key of r.members) mates.add(key);
     return mates;
   }
 
-  /** The node's context, as every app's guest is told it (`contextJson`, app-api.js). */
+  /** The context JSON every app's guest is told (`contextJson`, app-api.js). */
   context() {
     return contextJson({
       me: this.me,
@@ -118,8 +103,8 @@ export class Peers {
 
   // ── the transport ──────────────────────────────────────────────────────────
 
-  /** What the transport says each time its relay or its links change (`onStatus`), as its
-   *  `link/status` bytes: `[relay u8]`, then `[key 32][direct u8]` per linked peer. */
+  /** Handle the transport's status bytes (`onStatus`): `[relay u8]`, then
+   *  `[key 32][direct u8]` per linked peer. */
   status(status) {
     this.relayState = status[0];
     this.linked = new Map();
@@ -129,9 +114,9 @@ export class Peers {
     this.follow();
   }
 
-  /** Bring the transport in step with who this shell wants linked, for `keys`, or for
-   *  everyone with none named: room-mates are welcomed, so their calls need no contact
-   *  secret, and each wanted peer gets its address, the rest none. */
+  /** Bring the transport in line with who we want linked, for `keys` or everyone. Room-mates
+   *  are "welcomed" (they need no contact secret to call us), wanted peers get an address,
+   *  and others have theirs cleared. */
   sync(keys) {
     const mates = this.mates();
     void this.netOp(new OpArgs("welcome").blob(fromHex([...mates].join(""))));
@@ -144,21 +129,18 @@ export class Peers {
     this.follow();
   }
 
-  /** Give the transport its address for `key`: the contact secret to present, none to a
-   *  room-mate, which welcomes this node, and the relay to call it through. A key this shell
-   *  does not want linked has no destination, and none has one while it is on no relay: the
-   *  transport dials only what has one. */
+  /** Tell the transport how to reach `key`: the contact secret to present (none for a
+   *  room-mate) and the relay to dial through. Unwanted keys, or any key while we're on no
+   *  relay, get an empty destination, so the transport won't dial them. */
   teach(key) {
     const secret = this.roomsOf(key).length > 0 ? null : this.contacts.get(key);
     void this.netOp(new OpArgs("addr").blob(fromHex(key)).blob(secret ?? EMPTY)
       .text(this.relay && this.wanted.has(key) ? `relay+${this.relay.origin}` : ""));
   }
 
-  /** Run when the links or the relay's state change, and when who this shell wants linked
-   *  does. Nothing here runs by the clock. A wanted peer with no link is dialed, one whose
-   *  link dropped as much as one that never had one, while the transport is registered on
-   *  the relay the dial goes through. One that gave no answer is left alone (`dial`). Each
-   *  linked peer is told this node's nick, once. */
+  /** React to a change in links, relay state or wanted peers (event-driven, no timers):
+   *  dial wanted peers that aren't linked, unless they already went silent, and send our
+   *  nick to newly linked peers. */
   follow() {
     for (const [key, w] of this.wanted) {
       if (this.linked.has(key)) w.silent = false;
@@ -168,12 +150,9 @@ export class Peers {
     this.changed();
   }
 
-  /** Dial `key`, a wanted peer this node has no link to. Two that dial each other end up on
-   *  one link, since the transport keeps the smaller key's of a double connect (seedkernel
-   *  §12.6). One that does not link reads as `silent`, and is left alone until it is called
-   *  afresh, calls this node, or joins a room again: one not on the relay is known at once,
-   *  and one that ignores the call, as a node whose contact secret was not presented does,
-   *  once the handshake gives up on it. */
+  /** Dial an unlinked wanted peer. (If both sides dial, the transport keeps one link,
+   *  §12.6.) A peer that doesn't answer, e.g. because we lack its contact secret, is marked
+   *  `silent` and not redialed until it's called afresh, calls us, or rejoins a room. */
   async dial(key, w) {
     w.calling = true;
     const answer = await this.net(new OpArgs("dial").blob(fromHex(key)).u32(DIAL_MS)).catch(() => null);
@@ -183,26 +162,23 @@ export class Peers {
     this.changed();
   }
 
-  /** Have `key` called afresh, as a contact given again is. A dial to it still under way
-   *  presents what was known of it before, so the transport drops it with the peer's
-   *  address, and the next sync gives the peer one and dials it. Not for a linked peer,
-   *  whose link a forget would close. */
+  /** Reset `key` so the next sync dials it fresh (e.g. with a new contact secret). An
+   *  in-flight dial would still use the old address, so the transport forgets it, unless the
+   *  peer is linked, since forgetting closes the link. */
   callAfresh(key) {
     if (!this.linked.has(key)) void this.netOp(new OpArgs("forget").blob(fromHex(key)));
     this.wanted.delete(key);
   }
 
-  /** Close the links to those of `before` this shell no longer wants. Only what the user did
-   *  hangs up, leaving a room or removing a contact: a peer merely heard leaving hangs up
-   *  itself, and one whose relay dropped has not gone anywhere. */
+  /** Close links to peers in `before` that are no longer wanted. Only called after a user
+   *  action (leaving a room, removing a contact); a peer that leaves hangs up itself. */
   hangUpUnwanted(before) {
     for (const key of before) {
       if (!this.wanted.has(key)) void this.netOp(new OpArgs("forget").blob(fromHex(key)));
     }
   }
 
-  /** The ICE servers the transport uses toward `key` (seedkernel `ice`), for a peer
-   *  connection of the shell's own to ask the same STUN. */
+  /** The ICE servers the transport uses toward `key`, so call connections use the same. */
   async ice(key) {
     try { return JSON.parse(new TextDecoder().decode(await this.net(new OpArgs("ice").blob(fromHex(key))))); }
     catch { return []; }
@@ -210,21 +186,20 @@ export class Peers {
 
   // ── nicks ──────────────────────────────────────────────────────────────────
 
-  /** Set this node's nick, or with "" have none. Every peer's copy is stale, so nobody
-   *  counts as told any more. */
+  /** Set our nick ("" for none) and re-send it to every linked peer. */
   setNick(nick) {
     this.nick = nick.trim().slice(0, MAX_NICK);
     this.nickTold.clear();
     this.tellNick();
   }
 
-  /** What a peer said it calls itself, an empty nick for nothing. */
+  /** Record a peer's nick ("" clears it). */
   heardNick(key, nick) {
     if (nick) this.nicks.set(key, nick.slice(0, MAX_NICK)); else this.nicks.delete(key);
   }
 
-  /** Give each linked peer that has not heard it this node's nick. A peer counts as told
-   *  before the send, so nothing tells it twice, and no longer if its shell did not get it. */
+  /** Send our nick to each linked peer that hasn't had it. Marked as told before sending, so
+   *  it isn't sent twice, and unmarked if delivery fails. */
   tellNick() {
     for (const key of [...this.nickTold]) if (!this.linked.has(key)) this.nickTold.delete(key);
     const notice = new TextEncoder().encode(JSON.stringify({ nick: this.nick }));
@@ -237,13 +212,12 @@ export class Peers {
 
   // ── the relay and its rooms ────────────────────────────────────────────────
 
-  /** Be on the relay at `origin`, with `relaySecret` for a private one: the room client in
-   *  every joined room, and the transport registered there, so this node's key can be called.
-   *  Over once the transport is registered, or once that attempt has failed. */
+  /** Connect to the relay at `origin` (`relaySecret` for a private one): register the
+   *  transport, then join every room. Resolves once registration succeeds or fails. */
   async joinRelay(origin, relaySecret = null) {
     const fresh = this.relay?.origin !== origin || this.relay.relaySecret !== relaySecret;
     if (fresh) {
-      // The old relay's rooms are left, and their members heard leaving.
+      // Closing the old client reports its rooms' members as leaving.
       this.relay?.client.close();
       const { sodium, identity } = this;
       const client = roomClient({
@@ -259,38 +233,34 @@ export class Peers {
         },
       });
       this.relay = { origin, relaySecret, client };
-      // Contacts are called through this relay now: each is given its address there before
-      // the transport says it is registered, which is when they are called (`follow`).
+      // Give contacts their address on this relay now; they're dialed once it registers.
       this.sync();
     }
     const { client } = this.relay;
     const op = new OpArgs("relay").text(origin);
     if (relaySecret) op.text(relaySecret);
     await this.net(op);
-    // The rooms are joined once the transport is registered: a room tells its members of
-    // this node, and one of them calls it as soon as it hears.
+    // Join rooms only after registering, since members will dial us as soon as we appear.
     if (fresh && this.relay?.client === client) {
       for (const name of this.rooms.keys()) await client.join(name);
     }
   }
 
-  /** Be on no relay. The rooms keep their names for the next join, with nobody heard in
-   *  them, so the links they were the reason for are closed; a contact already linked stays
-   *  linked. */
+  /** Leave the relay. Rooms are kept (empty) for the next connect, so links that only
+   *  existed for a room close; linked contacts stay linked. */
   async leaveRelay() {
     if (!this.relay) return;
     const before = [...this.wanted.keys()];
     const { client } = this.relay;
     this.relay = null;
-    // The room client hears every member leave as it closes (`onMember`), and with no relay
-    // a contact has no address to be called at.
+    // Closing reports every member as leaving (`onMember`); `sync` then clears addresses.
     client.close();
     this.sync();
     this.hangUpUnwanted(before);
     await this.netOp(new OpArgs("relay").text(""));
   }
 
-  /** Join the room `name`, beside any already joined. */
+  /** Join room `name`, in addition to any others. */
   async joinRoom(name) {
     if (this.rooms.has(name)) return;
     this.rooms.set(name, { id: await roomId(name), members: new Set() });
@@ -298,7 +268,7 @@ export class Peers {
     await this.relay?.client.join(name);
   }
 
-  /** Leave one room, and hang up on everyone it was the only reason to be linked to. */
+  /** Leave a room and hang up on peers we were only linked to because of it. */
   async leaveRoom(name) {
     if (!this.rooms.has(name)) return;
     const before = [...this.wanted.keys()];
@@ -308,13 +278,13 @@ export class Peers {
     this.hangUpUnwanted(before);
   }
 
-  /** The joined rooms changed: whoever was in them is wanted or not afresh. */
+  /** The set of joined rooms changed: recompute who is wanted. */
   roomsChanged() {
     this.onRooms(true);
     this.sync();
   }
 
-  /** A key the room client heard join or leave a room. One that joins is called afresh. */
+  /** The room client saw `key` join or leave `room`. A joiner is dialed afresh. */
   onMember(room, key, present) {
     const r = this.rooms.get(room);
     if (!r || key === this.me) return;
@@ -326,8 +296,7 @@ export class Peers {
 
   // ── contacts ───────────────────────────────────────────────────────────────
 
-  /** Make `key` a contact, with its contact secret or null: linked whether or not a room is
-   *  shared. */
+  /** Make `key` a contact (secret or null), so it stays linked regardless of rooms. */
   addContact(key, secret) {
     if (key === this.me) return;
     this.contacts.set(key, secret);

@@ -1,33 +1,26 @@
-// What any view does the same way: bytes as hex, and the door to the shell, which is
-// postMessage and nothing else (browser/app-api.js). A view names this file in a script tag
-// ahead of its own, by its path from the page (`../view-lib/app.js`), and the builder puts
-// it into the page like any other (scripts/app-source.mjs `readView`). It is view SOURCE,
-// signed into each bundle that names it: to a view what assembly/guest-lib is to a guest.
+// Shared view source: hex helpers and `app`, the view's interface to the shell (which is
+// only postMessage; see browser/app-api.js). A view includes it with a script tag before its
+// own scripts (`../view-lib/app.js`), and the builder inlines it into the page.
 //
-// The door, whatever the app's guest:
+// Core interface:
 //
-//   app.ready()                    this view is listening: the node's context comes first,
-//                                  then what arrived while the page loaded
-//   app.call(...parts)             bytes for this app's guest, and a promise of its answer
-//   app.onRender(fn)               fn(bytes): what the guest answered a peer's frame
-//   app.onContext(fn)              fn(ctx): the node's context, which a guest passes on as
-//                                  render type 0 (guest-lib/context.js)
-//   app.conv({ room } | { to })    the conversation open, by id in hex, or none: a call
-//                                  started from the shell is with it
-//   app.contact(peer)              make a peer a contact, so the link to it outlives any
-//                                  shared room
-//   app.nameOf(key)                what a peer, or this node, calls itself, by the last
-//                                  context, or the start of its key
+//   app.ready()                    the view is listening; the context arrives first, then
+//                                  anything that came in while it loaded
+//   app.call(...parts)             send bytes to the guest; returns a promise of its answer
+//   app.onRender(fn)               fn(bytes): renders not handled below
+//   app.onContext(fn)              fn(ctx): the node's context (render type 0)
+//   app.conv({ room } | { to })    which conversation is open (ids in hex), or none; calls
+//                                  started from the shell's call bar go there
+//   app.contact(peer)              ask the shell to make a known peer a contact
+//   app.nameOf(key)                a peer's (or this node's) nick, or the start of its key
 //
-// And the view's half of guest-lib/room-pipe.js, for an app whose guest is that pipe or
-// builds on it:
+// The view side of guest-lib/room-pipe.js:
 //
-//   app.cast(room, ...parts)       a frame to every linked member of a room
-//   app.tell(room, to, ...parts)   a frame to one member of it
-//   app.onFrame(fn)                fn(from, room, body): a peer's frame, from a member of
-//                                  the room it names
+//   app.cast(room, ...parts)       send a frame to every linked member of a room
+//   app.tell(room, to, ...parts)   send a frame to one member
+//   app.onFrame(fn)                fn(from, room, body): a frame from a member of `room`
 //
-// Rooms and peers are named by id in hex, as the context names them.
+// Rooms and peers are identified by id in hex, as in the context.
 
 function toHex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -35,7 +28,7 @@ function toHex(bytes) {
 function fromHex(hex) {
   return Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
 }
-/** The parts end to end, in a buffer of its own. A part is bytes, or an array of them. */
+/** Concatenate byte arrays (or plain arrays of bytes) into a new buffer. */
 function concat(...parts) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
@@ -44,28 +37,26 @@ function concat(...parts) {
 }
 
 const app = (() => {
-  /** The renders guest-lib speaks: the context (context.js), and a peer's frame
-   *  (room-pipe.js), `[from 32][room 32][body]`. Every other is the app's own. */
+  /** Render types defined by guest-lib: the context, and a room-pipe frame
+   *  `[from 32][room 32][body]`. Other types are the app's own. */
   const RENDER_CONTEXT = 0, RENDER_FRAME = 1;
-  /** room-pipe.js's two asks: `[frame]`, and `[to 32][frame]`, a frame `[room 32][body]`. */
+  /** room-pipe.js's calls: cast `[frame]` and tell `[to 32][frame]`, frame = `[room 32][body]`. */
   const ASK_CAST = 1, ASK_TELL = 2;
 
   const dec = new TextDecoder();
   const bytesOf = (v) => (v instanceof Uint8Array ? v : new Uint8Array(v));
   const post = (msg) => window.parent.postMessage(msg, "*");
 
-  /** Who listens for what. `onContext` and `onFrame` each take one kind of render out of
-   *  what `onRender` hears. */
+  /** Listeners. Context and frame renders go to their own listener, the rest to `render`. */
   const heard = { render: null, context: null, frame: null };
-  /** The node's context as last told, for `nameOf`. */
+  /** The last context, for `nameOf`. */
   let ctx = null;
-  /** The calls not yet answered, by the id each went out under. */
+  /** Pending calls by id. */
   const calls = new Map();
   let nextCall = 1;
 
-  /** Hand this app's guest the parts as one run of bytes (its `ui` op). The shell answers
-   *  every call, so the promise settles: with what the guest answered, which may be
-   *  nothing, or with why it failed. */
+  /** Send the concatenated parts to the guest's `ui` op. The shell answers every call, so
+   *  the promise always settles: with the guest's answer (possibly empty), or its error. */
   function call(...parts) {
     const bytes = concat(...parts);
     return new Promise((resolve, reject) => {
@@ -105,8 +96,7 @@ const app = (() => {
     conv: (open = {}) => post({ type: "conv", room: open.room, to: open.to }),
     contact: (peer) => post({ type: "contact", peer }),
     nameOf: (key) => (key === ctx?.me ? ctx.nick : ctx?.nicks[key]) || key.slice(0, 8),
-    // Fire-and-forget, as the pipe is: neither is answered with anything, and a guest that
-    // failed has said so in the shell's Diagnostics.
+    // Fire-and-forget; guest errors show in the shell's Diagnostics.
     cast: (room, ...parts) => { call([ASK_CAST], fromHex(room), ...parts).catch(() => {}); },
     tell: (room, to, ...parts) => { call([ASK_TELL], fromHex(to), fromHex(room), ...parts).catch(() => {}); },
     onFrame: (fn) => { heard.frame = fn; },
