@@ -23,6 +23,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
+import { MemoryFs } from "seedkernel-wasm/fs-memory";
 
 import { APP_OP_CONTEXT, APP_OP_UI, MAX_QUEUED_RENDERS, admitGate, appFacts, bundleDigest, toHex, fromHex } from "../browser/app-api.js";
 import { Peers } from "../browser/peers.js";
@@ -68,8 +69,11 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
   const consents = new Set();
   const { shell } = await bootShell({
     sodium, identity,
-    // Never idle out links (rooms keep members linked).
-    transport: { channels: new WsNetwork(), onStatus: (s) => onStatus(s), config: { linkIdleTimeoutMs: 0 } },
+    services: {
+      fs: new MemoryFs(),
+      // Never idle out links (rooms keep members linked).
+      transport: { channels: new WsNetwork(), onStatus: (s) => onStatus(s), config: { linkIdleTimeoutMs: 0 } },
+    },
     admit: admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], consents, digest),
   });
 
