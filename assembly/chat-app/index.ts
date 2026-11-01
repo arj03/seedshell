@@ -2,9 +2,9 @@
 //
 // A pure-transform handler (seedkernel PROTOCOL §4): the host stages the input at
 // `scratch`, calls `handle`, and reads the render bytes back from `scratch`. No host
-// import, no signer query, no UI bridge — the sender identity is prepended by the host
-// (the AKE channel already authenticated it), and the render bytes are the return value
-// the app's guest answers with, which the shell hands to the app's view.
+// import, no signer query, no UI bridge — the app's guest puts the sender identity in front
+// (the caller it was handed, which the AKE channel authenticated), and the render bytes are
+// the return value the guest answers with, which the shell hands to the app's view.
 //
 // Input:   [pk 32][type u8][body ..]     a chat frame, with its sender in front
 //   type 3  direct text    body = [to 32][utf-8 text]
@@ -19,7 +19,7 @@
 // not in a frame or a render: a nick is the shell's, and the view reads it out of the
 // node's context.
 
-// The layout literal: the host prepends the 32-byte sender pk.
+// The layout literal: the guest puts the 32-byte sender pk in front.
 const PK_LEN: i32 = 32;
 
 const SCRATCH_SIZE: i32 = 0x40000; // 256 KB — input (pk‖type‖body) + render output

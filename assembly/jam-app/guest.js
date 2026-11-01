@@ -1,7 +1,7 @@
 // Jam's guest: a room's chat, its emoji reactions and the playlist it keeps and plays
-// together. What a room holds, and how two nodes' copies of it are brought to agree, is the
-// view's (ui.js). What is the guest's is the part a view cannot be trusted with or cannot
-// do: who a frame goes to, whether a peer's frame is from someone in the room it names, and
+// together. What a room holds, and how two nodes' copies of it are brought to agree, is a
+// member's (room.js). What is the guest's is the part a view cannot be trusted with or
+// cannot do: who a frame goes to, whether a peer's frame is from someone in the room it names, and
 // what a block of audio is called.
 //
 // The first two are guest-lib/room-pipe.js, which app.json names in front of this file: a

@@ -49,7 +49,7 @@ the shell makes into the runtime goes through a published entry point of
 
 ### Prerequisites
 
-- **Node.js ≥ 20.**
+- **Node.js ≥ 22.**
 - **Sibling checkouts** of [seedkernel](https://github.com/arj03/seedkernel) and
   [seedrelay](https://github.com/arj03/seedrelay) (the relay server `npm run relay`
   starts). Both are `file:` dependencies (`../seedkernel/WASM`, `../seedrelay`), so the
@@ -105,7 +105,7 @@ Open the page in two tabs or two browsers and join the same room in both on the
 | --- | --- |
 | `npm run build` | Signs every app and the shell boot bundle, then vendors the runtime. |
 | `npm run build:apps` | Signs each directory under `assembly/` with an `app.json` into `bundle/<app>.skb` (`chat.skb`, `hello.skb`, `jam.skb`, `radio.skb`, `shell.skb`), compiling chat's AssemblyScript module on the way, and writes the boot bundle beside the page as `browser/shell-bundle.js`. `npm run build:apps -- assembly/jam-app` signs just the one. |
-| `npm run vendor` | Copies the built seedkernel host and its host blob (QuickJS and the host's crypto) into `browser/vendor/`. |
+| `npm run vendor` | Copies the built seedkernel host, its host blob (QuickJS and the host's crypto) and seedrelay's room client into `browser/vendor/`. |
 | `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
 | `npm run e2e` | The shell in a real headless browser, two tabs and a relay (needs `npm run build` first). Run it after a change to the shell or an app's view. |
 | `npm run relay` | Starts the `seedrelay` relay on port 8080, with STUN on UDP 3478 and 3479. |
@@ -136,7 +136,7 @@ side by side. An app's `fs` keyspace lives in the page's memory, so what an app 
 there lasts until the tab is reloaded; the bundles themselves are kept for the tab and
 installed again.
 
-**Offers.** Peers hand each other bundles in an `OFFER` frame; the recipient
+**Offers.** Peers hand each other bundles under `offer/v1`; the recipient
 re-verifies the original author's manifest signature. An Offer is installed on one
 click, so the recipient checks what the bundle asks for before showing that click, and
 the row says it: the protocols it **serves**, and what it **reaches** (see the [trust model](#trust-model)). A signature says
@@ -307,13 +307,13 @@ nick is a peer's own word.
 | `node/shell.mjs` | The headless shell: a node with no page, hosting one app whose head is plain script it runs, behind the door a view has to its guest. It owns the identity, the nick, the relay, the rooms and the links, as the page does, and has no contacts, offers or calls. |
 | `node/radio.mjs` | The radio, as it is started: the directory it is pointed at as a library of titles, a key file, and the headless shell running `bundle/radio.skb` with the radio's head. |
 | `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` op, and keys as hex. Every app and the boot bundle use it. |
-| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms and the linked peers read out of the node's context, the context passed on to the view as render type 0, and the entrypoint, which tells a peer's frame from the view's bytes so a guest is written as what it does with each (`guest.peer`, `guest.view`). Chat and jam use it. |
+| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms and the linked peers read out of the node's context, the context passed on to the view as render type 0, and the entrypoint, which tells a peer's frame from the view's bytes so a guest is written as what it does with each (`guest.peer`, `guest.view`). Chat, jam, hello and the radio use it. |
 | `assembly/guest-lib/room-pipe.js` | A guest, whole: a pipe scoped to a room, for an app whose state lives in its view. What the view casts goes to the room's linked members, what it tells goes to one of them, and a peer's frame is passed on only from a member of the room it names. An app that needs no more names no guest, and is given this one, as hello is. Jam builds on it. |
-| `assembly/view-lib/app.js` | View source any view puts in front of its own: bytes as hex, and the door to the shell as one object, `app`. A call to the guest is a promise of its answer, and `cast`, `tell` and `onFrame` are the view's half of the room pipe. Chat's and jam's views use it. |
+| `assembly/view-lib/app.js` | View source any view puts in front of its own: bytes as hex, and the door to the shell as one object, `app`. A call to the guest is a promise of its answer, and `cast`, `tell` and `onFrame` are the view's half of the room pipe. Every view here uses it. |
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed: what an `app.json` leaves out filled in, a view's stylesheets and scripts put into its page, and a module written in AssemblyScript compiled. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs every app directory under `assembly/`, or the ones it is named, into `bundle/<app>.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. A boot bundle is also written beside the page as a module (`browser/<app>-bundle.js`). |
 | `scripts/author.mjs` | The author key and each app's version count, which the builder signs through: its first run mints the key. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob (`build/host.skb`: the QuickJS realm engine and the host's crypto). Refuses a stale seedkernel build. |
+| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob (`build/host.skb`: the QuickJS realm engine and the host's crypto) and seedrelay's room client (`rooms.mjs`). Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips a page notice, a call signal and an offer through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, a cast and a tell through hello, whose guest is the room pipe and nothing else, and puts the radio's bundle where jam stood on one shell, to hear the other's jam. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then hello beside chat, a line from one tab shown in the other, and removed. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Then one tab removes the other as its peer and hangs up, and the other still hears of it. Last the radio, started on a directory the test fills: a tab finds its library, searches it, has titles put in the list and plays one, fetched from the radio, and after a reload gets the room back from the radio alone. When the radio goes, its tracks cannot be played and the room passes over them, and a radio started again on the same directory serves them again. The FLAC files it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `browser/vendor/` when a rebuild isn't taking. |
@@ -415,7 +415,7 @@ answers. Each answer goes to the view, or is nothing.
 
 | Caller | `handle` receives | Sent | Its answer |
 | --- | --- | --- | --- |
-| A peer | `[sender 32][frame …]` under a protocol the app claims. The sender's key is prepended by the host after the channel has authenticated the peer; the guest never verifies anything. | When the frame arrives. | **Render bytes**, for the view. |
+| A peer | `[sender 32][frame …]` under a protocol the app claims. The sender's key is put in front by the transport once the channel has authenticated the peer; the guest never verifies anything. | When the frame arrives. | **Render bytes**, for the view. |
 | The shell, op `ctx` | `[zero 32][3]["ctx"][JSON]`: the node's context, below. | After the install, when the context changes, and when the view says it is ready. | Render bytes too. |
 | The shell, op `ui` | `[zero 32][2]["ui"][bytes …]`: whatever the app's own view posted with `call`. | When the view calls. | The **answer** to that call. |
 
@@ -839,8 +839,10 @@ What each one is and does is seedkernel's to document, in its
 | `seedkernel-wasm/shell-core` | `bootShell`, the headless shell's node |
 | `seedkernel-wasm/bundle` | `verifyBundle` on a dropped or offered bundle, and `genesisHash` for the digest a consent names |
 | `seedkernel-wasm/bundle-author` | Signing, in the offline builders only |
-| `seedkernel-wasm/net-ws`, `net-rtc`, `socket-seam` | The page's sockets: a WebSocket to the relay and WebRTC to peers, combined as `transport.channels` |
+| `seedkernel-wasm/net-ws`, `net-rtc`, `socket-seam` | The page's sockets: a WebSocket to the relay and WebRTC to peers, combined as `transport.channels`. The headless shell takes `net-ws` alone |
+| `seedkernel-wasm/fs-memory` | `MemoryFs`, the headless shell's store |
 | `seedkernel-wasm/op-frame` | `writeOp` and `OpArgs`, for calls into an app's guest and into the transport |
+| `seedkernel-wasm/transport-bundle` | `transportBundleBytes`, in the smoke and browser tests |
 
 What the shell builds on them:
 
@@ -864,8 +866,8 @@ blob's engine and crypto, rather than evaluating the blob's script. It allows `'
 because app views run in sandboxed `blob:` iframes that inherit the page's policy. The
 sandbox keeps a view from the page, and the policy each view is loaded under
 (`browser/view-guard.js`) keeps it from the network. The browser JS entry points are
-declared in exactly two places, the imports at the top of `shell.js` and the import map in
-`shell.html`, and nothing else in this repo reaches into `node_modules`. So a seedkernel
+declared in two places, the imports at the top of `shell.js` and `peers.js` and the import
+map in `shell.html`, and nothing else in this repo reaches into `node_modules`. So a seedkernel
 change that breaks the shell broke a public export, which is the point of the shell living
 out here.
 
