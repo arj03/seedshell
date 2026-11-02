@@ -31,7 +31,7 @@ const sodium = await loadCrypto();
 // from the transport options passed here. The shells' admit is then ONLY the consent gate.
 const { browserPlatform } = await import("seedkernel-wasm/platform-web");
 const { platformHost } = await import("seedkernel-wasm/platform");
-const HOST_BLOB = new Uint8Array(readFileSync(fileURLToPath(import.meta.resolve("seedkernel-wasm/host.skb"))));
+const HOST_BLOB = new Uint8Array(readFileSync(fileURLToPath(import.meta.resolve("seedkernel-wasm/host-web.skb"))));
 const standUp = (cfg) => platformHost(browserPlatform({ hostBlob: HOST_BLOB })).standUp(cfg);
 // `TRANSPORT_SERVICE` is emitted beside the blob it belongs to, not known to the host:
 // a replacement transport may spell its claim differently, and then THAT spelling is the

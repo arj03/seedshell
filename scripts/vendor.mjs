@@ -75,14 +75,15 @@ mkdirSync(vendor, { recursive: true });
 cpSync(hostSrc, resolve(vendor, "seedkernel"), { recursive: true });
 
 // The host blob: qjs.wasm, libsodium and ML-DSA-65 (§12.4), the same bytes Node and native
-// nodes run, so the shell admits exactly the bundles they admit.
+// nodes run, so the shell admits exactly the bundles they admit. The `-web` build leaves out
+// the host script, since the page runs the host from the modules copied above.
 {
-  const src = resolve(rawDir, "host.skb");
+  const src = resolve(rawDir, "host-web.skb");
   if (!existsSync(src)) {
-    console.error("missing build/host.skb — in the seedkernel checkout: cd WASM && npm run build");
+    console.error("missing build/host-web.skb, in the seedkernel checkout: cd WASM && npm run build");
     process.exit(2);
   }
-  copyFileSync(src, resolve(vendor, "host.skb"));
+  copyFileSync(src, resolve(vendor, "host-web.skb"));
 }
 
 // ── seedrelay's room client (sibling checkout, `file:../seedrelay`) ──────────

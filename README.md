@@ -313,7 +313,7 @@ nick is a peer's own word.
 | `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed: what an `app.json` leaves out filled in, a view's stylesheets and scripts put into its page, and a module written in AssemblyScript compiled. The builder and the smoke test share it. |
 | `scripts/build-app-bundle.mjs` | The offline bundle author: signs every app directory under `assembly/`, or the ones it is named, into `bundle/<app>.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. A boot bundle is also written beside the page as a module (`browser/<app>-bundle.js`). |
 | `scripts/author.mjs` | The author key and each app's version count, which the builder signs through: its first run mints the key. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob (`build/host.skb`: the QuickJS realm engine and the host's crypto) and seedrelay's room client (`rooms.mjs`). Refuses a stale seedkernel build. |
+| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob without its script (`build/host-web.skb`: the QuickJS realm engine and the host's crypto) and seedrelay's room client (`rooms.mjs`). Refuses a stale seedkernel build. |
 | `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips a page notice, a call signal and an offer through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, a cast and a tell through hello, whose guest is the room pipe and nothing else, and puts the radio's bundle where jam stood on one shell, to hear the other's jam. |
 | `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then hello beside chat, a line from one tab shown in the other, and removed. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Then one tab removes the other as its peer and hangs up, and the other still hears of it. Last the radio, started on a directory the test fills: a tab finds its library, searches it, has titles put in the list and plays one, fetched from the radio, and after a reload gets the room back from the radio alone. When the radio goes, its tracks cannot be played and the room passes over them, and a radio started again on the same directory serves them again. The FLAC files it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
 | `scripts/clean.mjs` | Deletes `browser/vendor/` when a rebuild isn't taking. |
@@ -835,7 +835,7 @@ What each one is and does is seedkernel's to document, in its
 | `seedkernel-wasm` | `loadCrypto`, in the bundle builders, the radio and the smoke test |
 | `seedkernel-wasm/platform-web` | `browserPlatform`, the page's platform over the host blob |
 | `seedkernel-wasm/platform` | `platformHost`, the host the page's node is stood up by |
-| `seedkernel-wasm/host.skb` | The host blob, vendored beside the page and read by the smoke test |
+| `seedkernel-wasm/host-web.skb` | The host blob without its script, vendored beside the page and read by the smoke test |
 | `seedkernel-wasm/shell-core` | `bootShell`, the headless shell's node |
 | `seedkernel-wasm/bundle` | `verifyBundle` on a dropped or offered bundle, and `genesisHash` for the digest a consent names |
 | `seedkernel-wasm/bundle-author` | Signing, in the offline builders only |
@@ -862,9 +862,9 @@ What the shell builds on them:
   against the shipped transport.
 
 The page's CSP has no `'unsafe-eval'`: the page imports the host and takes only the host
-blob's engine and crypto, rather than evaluating the blob's script. It allows `'unsafe-inline'`
-because app views run in sandboxed `blob:` iframes that inherit the page's policy. The
-sandbox keeps a view from the page, and the policy each view is loaded under
+blob's engine, crypto and transport, rather than evaluating the blob's script. It allows
+`'unsafe-inline'` because app views run in sandboxed `blob:` iframes that inherit the page's
+policy. The sandbox keeps a view from the page, and the policy each view is loaded under
 (`browser/view-guard.js`) keeps it from the network. The browser JS entry points are
 declared in two places, the imports at the top of `shell.js` and `peers.js` and the import
 map in `shell.html`, and nothing else in this repo reaches into `node_modules`. So a seedkernel

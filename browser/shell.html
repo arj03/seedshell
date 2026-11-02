@@ -284,8 +284,8 @@
 
 <!-- The seedkernel surface the shell depends on, declared in one place. `npm run vendor`
      copies seedkernel-wasm's built host (build-min: host/ + services/) into
-     ./vendor/seedkernel/, and seedkernel's host blob (its realm engine and its crypto) to
-     ./vendor/host.skb, which host-blob.js fetches and shell.js hands to the browser platform;
+     ./vendor/seedkernel/, and seedkernel's host blob without its script (its realm engine and
+     its crypto) to ./vendor/host-web.skb, which host-blob.js fetches and shell.js hands to the browser platform;
      the seedkernel-wasm/* specifiers below are the entire contract between this page and the
      runtime. -->
 <script type="importmap">

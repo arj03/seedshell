@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { runInThisContext } from "node:vm";
 
 import { bootShell } from "seedkernel-wasm/shell-core";
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { verifyBundle, genesisHash } from "seedkernel-wasm/bundle";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
@@ -72,7 +73,10 @@ export async function hostApp({ sodium, identity, nick = "", relay, relaySecret 
     services: {
       fs: new MemoryFs(),
       // Never idle out links (rooms keep members linked).
-      transport: { channels: new WsNetwork(), onStatus: (s) => onStatus(s), config: { linkIdleTimeoutMs: 0 } },
+      transport: {
+        bundle: transportBundleBytes(), channels: new WsNetwork(), onStatus: (s) => onStatus(s),
+        config: { linkIdleTimeoutMs: 0 },
+      },
     },
     admit: admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], consents, digest),
   });
