@@ -101,16 +101,19 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 // The relay. It answers a page only from an origin it allows, and its defaults are the
 // usual local ports, so this one is told the port the page was just given.
 const relayPort = await freePort();
-const procs = [spawn(process.execPath, [relayPath, "--port", String(relayPort), "--allow-origin", origin], { stdio: "ignore" })];
-for (let i = 0; ; i++) {
-  const up = await new Promise((resolve) => {
-    const s = net.connect(relayPort, "127.0.0.1", () => { s.destroy(); resolve(true); });
-    s.on("error", () => resolve(false));
+const relayProc = spawn(process.execPath, [relayPath, "--port", String(relayPort), "--allow-origin", origin], { stdio: ["ignore", "pipe", "ignore"] });
+const procs = [relayProc];
+// Its URL names its key, new each run, which the banner prints.
+const relayUrl = await new Promise((resolve) => {
+  let out = "";
+  const timer = setTimeout(() => { console.error("e2e: the relay did not start"); process.exit(2); }, 5000);
+  relayProc.stdout.on("data", (d) => {
+    out += d;
+    const m = /listening on (ws:\/\/[0-9a-f]{64}\.[0-9a-f]{64}@127\.0\.0\.1:\d+)/.exec(out);
+    if (m) { clearTimeout(timer); resolve(m[1]); }
   });
-  if (up) break;
-  if (i > 50) { console.error("e2e: the relay did not start"); process.exit(2); }
-  await sleep(100);
-}
+});
+relayProc.stdout.resume();
 
 // The browser. A fake camera and microphone, granted without a prompt, let a call start,
 // and a page may play audio without a click first, since nothing here is a person's click.
@@ -496,7 +499,7 @@ try {
   // 3. join one room on the relay, which takes no app; an app's view hears of the room
   //    from its own guest
   for (const tab of [A, B]) {
-    await page(tab, `document.getElementById('relay-url').value = 'ws://127.0.0.1:${relayPort}'; document.getElementById('relay-room').value = 'e2e'; ${click("join-room")}`);
+    await page(tab, `document.getElementById('relay-url').value = '${relayUrl}'; document.getElementById('relay-room').value = 'e2e'; ${click("join-room")}`);
   }
   for (const tab of [A, B]) await waitFor(`${tab.name}: linked to the other tab`, async () => /^1 peer/.test(await peerPill(tab)));
   await waitFor("A: chat's view hears of the room", async () => (await roomsInView(A)).includes("e2e"));
@@ -545,6 +548,13 @@ try {
   await waitFor("B: chat draws A's direct message", async () => (await logOf(B)).includes("psst, just you"));
   await waitFor("A: B is a contact, as the view asked", async () => (await contactsOf(A)).includes(keyB));
   await waitFor("B: and lists A as its peer too", async () => (await contactsOf(B)).includes(keyA));
+  // Each is gated by its key's own secret, and each now holds the other's, told over the
+  // link, so either can redial the other once they share no room.
+  const ownSecret = (tab) => page(tab, "document.getElementById('contact-secret').value");
+  const heldFor = async (tab, key) => JSON.parse(await contactsOf(tab))[key];
+  await waitFor("A and B: each holds the other's contact secret", async () =>
+    /^[0-9a-f]{64}$/.test(await ownSecret(A)) && (await heldFor(A, keyB)) === (await ownSecret(B)) &&
+    (await heldFor(B, keyA)) === (await ownSecret(A)));
 
   // 10. a bundle that is not an app for this shell (the transport's has no `shell` entry)
   //     is refused, saying why, and changes nothing
@@ -874,7 +884,7 @@ try {
   /** The radio on `music`, in the room, under the same key each time it is started. */
   const startRadio = () => {
     const started = spawn(process.execPath, [join(root, "node", "radio.mjs"), music,
-      "--room", "e2e", "--relay", `ws://127.0.0.1:${relayPort}`, "--key", join(radioHome, "radio.key")], { stdio: ["ignore", "pipe", "pipe"] });
+      "--room", "e2e", "--relay", relayUrl, "--key", join(radioHome, "radio.key")], { stdio: ["ignore", "pipe", "pipe"] });
     procs.push(started);
     for (const out of [started.stdout, started.stderr]) out.on("data", (said) => radioSaid.push(String(said)));
     return started;

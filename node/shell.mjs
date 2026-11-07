@@ -39,7 +39,8 @@ const VIEW_LIB = join(dirname(fileURLToPath(import.meta.url)), "../assembly/view
 
 /** Run a node hosting the app in `bundle` (.skb bytes). `head` lists the head's script
  *  paths in order; `grants` are extra globals for it. The node uses `identity` and `nick`,
- *  registers on `relay` (`ws[s]://host[:port]`, `relaySecret` if private) and joins `rooms`.
+ *  registers on `relay` (`ws[s]://<key>@host[:port]`, `relaySecret` in hex if private) and
+ *  joins `rooms`.
  *  `say` receives status messages. Returns `{ key, close }`. */
 export async function hostApp({ sodium, identity, nick = "", relay, relaySecret = null, rooms, bundle, head, grants = {}, say = console.log }) {
   const digest = (bytes) => genesisHash(sodium, bytes);

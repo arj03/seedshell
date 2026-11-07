@@ -1,10 +1,10 @@
 // The radio: a node with no page that sits in a jam room with a directory of music behind
 // it. Whoever is in the room looks through that music from jam's view, and plays from it.
 //
-//   npm run radio -- <music directory> [--room <name>] [--relay <ws://host:port>]
+//   npm run radio -- <music directory> --relay <ws://<relay key>.<secret>@host:port> [--room <name>]
 //                    [--relay-secret <secret>] [--nick <name>] [--key <file>]
 //
-//   npm run radio -- ~/Music --room cats
+//   npm run radio -- ~/Music --relay ws://<relay key>.<secret>@localhost:8080 --room cats
 //
 // It runs the radio app (assembly/radio-app, built to bundle/radio.skb) in the headless
 // shell (node/shell.mjs). The bundle's guest is jam's own, so the radio speaks `jam` as
@@ -32,12 +32,12 @@ const AUDIO = /\.(flac|ogg|oga)$/i;
 
 function usage(why) {
   if (why) console.error(`radio: ${why}`);
-  console.error("usage: npm run radio -- <music directory> [--room <name>] [--relay <ws://host:port>]\n" +
+  console.error("usage: npm run radio -- <music directory> --relay <ws://<relay key>.<secret>@host:port> [--room <name>]\n" +
     "                         [--relay-secret <secret>] [--nick <name>] [--key <file>]");
   process.exit(2);
 }
 
-const flags = { room: "global", relay: "ws://localhost:8080", "relay-secret": null, nick: "radio", key: "radio.key" };
+const flags = { room: "global", relay: null, "relay-secret": null, nick: "radio", key: "radio.key" };
 let dir = null;
 for (let args = process.argv.slice(2), i = 0; i < args.length; i++) {
   const name = args[i].startsWith("--") ? args[i].slice(2) : null;
@@ -49,9 +49,11 @@ if (dir === null) usage();
 dir = resolve(dir);
 if (!existsSync(dir)) usage(`there is no ${dir}`);
 if (!ROOM_NAME_RE.test(flags.room)) usage("a room's name is 1 to 128 of A-Z a-z 0-9 . _ -");
+if (flags.relay === null) usage("--relay names the relay, ws://<relay key>.<secret>@host:port, as it prints it");
 let relay;
 try { relay = new URL(flags.relay); } catch { usage(`${flags.relay} is not a relay's address`); }
 if (relay.protocol !== "ws:" && relay.protocol !== "wss:") usage("a relay's address is ws:// or wss://");
+if (!/^[0-9a-f]{64}(?:\.[0-9a-f]{64})?$/i.test(relay.username)) usage("a relay's address names its key and secret, ws://<relay key>.<secret>@host:port");
 if (Number(process.versions.node.split(".")[0]) < 22) usage("it dials the relay with the platform's WebSocket, which is Node 22's and later's");
 const bundlePath = join(root, "bundle", "radio.skb");
 if (!existsSync(bundlePath)) usage(`${bundlePath} not found: run \`npm run build\` first`);
@@ -128,7 +130,7 @@ const node = await hostApp({
   sodium,
   identity: identityAt(resolve(flags.key)),
   nick: flags.nick,
-  relay: `${relay.protocol}//${relay.host}`,
+  relay: `${relay.protocol}//${relay.username}@${relay.host}`,
   relaySecret: flags["relay-secret"],
   rooms: [flags.room],
   bundle: new Uint8Array(readFileSync(bundlePath)),

@@ -15,7 +15,6 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { Peers, ROOM_NAME_RE, friendlyRoom } from "./peers.js";
-import { roomId } from "seedrelay/rooms";
 import { MediaCalls } from "./media-rtc.js";
 import { APP_GRANTS, APP_OP_CONTEXT, APP_OP_UI, MAX_QUEUED_RENDERS, admitGate, appFacts, bundleDigest, toHex, fromHex } from "./app-api.js";
 import { guardView } from "./view-guard.js";
@@ -186,9 +185,12 @@ const myPkHex = toHex(myKeys.publicKey);
 shellPrint(`I am ${myPkHex.slice(0, 8)}`, "sys");
 
 // ─── the contact secret ────────────────────────────────────────────────
-// This node's contact secret (see peers.js), or null.
+// This node's contact secret (see peers.js), as the transport answers it, or null for an
+// open node. By default the transport derives one from this node's key; one set here, or
+// "open", is kept for the tab.
 const savedContact = sessionStorage.getItem("shell.contactSecret");
-let myContactSecret = savedContact && HEX32_RE.test(savedContact) ? fromHex(savedContact) : null;
+const contactConfig = savedContact === "open" || (savedContact && HEX32_RE.test(savedContact)) ? { contactSecret: savedContact } : {};
+let myContactSecret = null;
 
 // The sockets the transport drives: the relay WebSocket and WebRTC data channels.
 const net = combineChannels(new WsNetwork(), new RtcNetwork());
@@ -206,7 +208,7 @@ const { shell } = await host.standUp({
   transport: {
     channels: net,
     onStatus: (status) => onStatus(status),
-    config: { linkIdleTimeoutMs: 0, ...(myContactSecret ? { contactSecret: toHex(myContactSecret) } : {}) },
+    config: { linkIdleTimeoutMs: 0, ...contactConfig },
   },
   // The shell app's author and app come from the generated browser/shell-bundle.js.
   admit: admitGate([{ author: SHELL_AUTHOR_HEX, app: SHELL_APP }], pendingApprovals, digest),
@@ -262,7 +264,10 @@ async function tellPage(peerId, notice) {
 }
 
 /** Handle a shell/v1 notice from `from`. Contact adds and removals are mirrored, so both
- *  ends agree on being peers. */
+ *  ends agree on being peers. An add carries the sender's contact secret, over the
+ *  authenticated link, so each end can redial the other once they share no room: the end
+ *  that is added adds back, and tells its own in turn; the first end, already holding the
+ *  contact, only takes the secret, so the exchange stops there. */
 function onPageNotice(from, bytes) {
   let msg;
   try { msg = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
@@ -273,10 +278,17 @@ function onPageNotice(from, bytes) {
     return;
   }
   if (typeof msg?.peer !== "boolean") return;
+  const theirs = typeof msg.secret === "string" && HEX32_RE.test(msg.secret) ? fromHex(msg.secret) : null;
   if (msg.peer && !peers.contacts.has(from)) {
-    addContact(from, null, { tell: false });
+    addContact(from, theirs);
     shellPrint(`${peers.label(from)} added you as a peer.`, "sys");
-  } else if (!msg.peer && peers.contacts.has(from)) {
+  } else if (msg.peer) {
+    const known = peers.contacts.get(from);
+    if (theirs && (!known || toHex(known) !== msg.secret.toLowerCase())) {
+      peers.addContact(from, theirs);
+      saveContacts();
+    }
+  } else if (peers.contacts.has(from)) {
     removeContact(from, { tell: false });
     shellPrint(`${peers.label(from)} removed you as a peer.`, "sys");
   }
@@ -1064,8 +1076,10 @@ function removeContact(key, { tell = true } = {}) {
   void tellRemoved(key, before);
 }
 
-/** The shell/v1 notice that we added (true) or removed (false) a peer. */
-const peerNotice = (added) => new TextEncoder().encode(JSON.stringify({ peer: added }));
+/** The shell/v1 notice that we added (true) or removed (false) a peer. An add carries this
+ *  node's contact secret, none when it is open, so the peer can reach it without a room. */
+const peerNotice = (added) => new TextEncoder().encode(JSON.stringify(
+  added ? { peer: true, secret: myContactSecret ? toHex(myContactSecret) : "" } : { peer: false }));
 
 /** Tell `key` we removed it, then hang up on peers in `before` no longer wanted. (A closing
  *  link still delivers what was sent first, §12.6.) If `key` isn't linked, the notice is
@@ -1102,13 +1116,12 @@ function connectPeer(key, field) {
   if (secret !== undefined) recontact(key, secret);
 }
 
-/** Set our contact secret, or null to accept any caller (§12.6.3). Existing links stay up,
- *  and room-mates are always answered. */
+/** Set our contact secret, or null to open the node to any caller (§12.6.3). Existing
+ *  links stay up, and room-mates are always answered. */
 async function setMyContact(secret) {
-  await peers.net(new OpArgs("contact").blob(secret ?? new Uint8Array(0)));
-  myContactSecret = secret;
-  if (secret) sessionStorage.setItem("shell.contactSecret", toHex(secret));
-  else sessionStorage.removeItem("shell.contactSecret");
+  const now = await peers.net(new OpArgs("contact").blob(secret ?? new Uint8Array(0)));
+  myContactSecret = now.length > 0 ? now : null;
+  sessionStorage.setItem("shell.contactSecret", secret ? toHex(secret) : "open");
   updateContactHint();
 }
 
@@ -1432,13 +1445,17 @@ if (navigator.connection && typeof navigator.connection.addEventListener === "fu
 // The room joined when none is typed.
 const DEFAULT_ROOM = "global";
 
-// Split a relay URL into its origin and an optional room from the path
-// (so `ws://host:8080/my-room` works in the URL field).
+// Split a relay URL into its origin, the relay's key and secret as its user, and an
+// optional room from the path (so `ws://<relay key>.<secret>@host:8080/my-room` works in
+// the URL field).
 function parseRelay(base) {
   let u;
   try { u = new URL(base); } catch { return null; }
   if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
-  return { origin: `${u.protocol}//${u.host}`, room: decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, "")) };
+  // The relay's key travels as the URL's user, since its link is pinned to it, and its
+  // contact secret after it, unless the relay is open.
+  if (!/^[0-9a-f]{64}(?:\.[0-9a-f]{64})?$/i.test(u.username)) return null;
+  return { origin: `${u.protocol}//${u.username.toLowerCase()}@${u.host}`, room: decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, "")) };
 }
 
 // The current or last Connect: `{ base, joining }`, base being the URL as typed (saved for
@@ -1458,7 +1475,7 @@ async function connectRelay() {
   const base = relayUrlInput.value.trim();
   if (!base) { shellPrint("Enter a relay URL.", "err"); return; }
   const target = parseRelay(base);
-  if (!target) { shellPrint("Relay URL must be ws:// or wss://.", "err"); return; }
+  if (!target) { shellPrint("Relay URL must be ws://<relay key>.<secret>@host:port or wss://<relay key>.<secret>@host, as the relay prints it.", "err"); return; }
   if (target.room && !roomNameOk(target.room)) return;
   const relaySecret = relaySecretInput.value.trim() || null;
   const join = relayJoin = { base, joining: true };
@@ -1545,7 +1562,7 @@ function showRelayState(state) {
   } else {
     relayStatus.textContent = "unreachable — retrying";
     setRelayPill("err", "relay down");
-    // A private relay drops a node with the wrong secret, which looks like unreachable here.
+    // A private relay says nothing to a node without its secret, which looks like unreachable here.
     shellPrint(`Relay unreachable — is one running at ${origin}, and if it is private, is the relay secret right? ` +
       "Retrying; existing P2P links are unaffected.", "err");
   }
@@ -1649,8 +1666,9 @@ function updateContactHint() {
   contactHint.innerHTML = myContactSecret
     ? "Someone who is not in a room with you must present this node's <strong>contact secret</strong> " +
       "to connect. <strong>Copy contact link</strong> carries it, with your key."
-    : "This node has <strong>no contact secret</strong>: anyone on the relay who has its key can connect. " +
-      "Set one to answer only your room-mates and whoever you give it to.";
+    : "This node is <strong>open</strong>: anyone who reaches it is answered, and can make it do a " +
+      "handshake's work. Open is public. <strong>New secret</strong> gates it again, answering only your " +
+      "room-mates and whoever you give it to.";
 }
 
 // "Random": append 16 random bytes so the room name can't be guessed (see seedrelay's
@@ -1675,7 +1693,7 @@ async function copyOrPrint(text, copied, what) {
 
 /** Apply the contact secret field: 64 hex chars, or empty for none. */
 async function applyContactField() {
-  const secret = readHex32(contactInput, "A contact secret is 64 hex characters, or empty for none.");
+  const secret = readHex32(contactInput, "A contact secret is 64 hex characters, or empty to open the node to anyone.");
   if (secret === undefined) return;
   try { await setMyContact(secret); }
   catch (err) { shellPrint(`Could not set the contact secret: ${err.message}`, "err"); }
@@ -1688,7 +1706,7 @@ contactNewBtn.addEventListener("click", () => {
 });
 contactCopyBtn.addEventListener("click", () => void copyOrPrint(contactLink(), myContactSecret
   ? "Contact link copied — it carries this node's key and contact secret. Anyone with it can connect to you."
-  : "Contact link copied — this node's key; it has no contact secret.", "link"));
+  : "Contact link copied — this node's key; the node is open.", "link"));
 
 /** "Add peer": accepts a contact link, or a key plus optional secret. */
 function addContactFromFields() {
@@ -1708,13 +1726,14 @@ contactAddBtn.addEventListener("click", addContactFromFields);
 hexField(contactAddInput, addContactFromFields);
 hexField(contactAddSecretInput, addContactFromFields);
 
-// Default relay URL: the page's own host, so a phone loading the shell from a desktop's LAN
-// IP gets the right value. An HTTPS page can only use wss://, so it assumes the same origin
-// proxies the relay (as seedrelay's droplet script sets up). "localhost" on file://.
-function defaultRelayUrl() {
-  if (location.protocol === "https:") return `wss://${location.host}`;
+// What a relay URL looks like here: the page's own host, so a phone loading the shell from a
+// desktop's LAN IP sees the right one. An HTTPS page can only use wss://, so it assumes the
+// same origin proxies the relay (as seedrelay's droplet script sets up). "localhost" on
+// file://. The relay's key comes from whoever runs it, so the field starts empty.
+function relayUrlHint() {
+  if (location.protocol === "https:") return `wss://<relay key>.<secret>@${location.host}`;
   const host = location.hostname || "localhost";
-  return `ws://${host}:8080`;
+  return `ws://<relay key>.<secret>@${host}:8080`;
 }
 
 // React to any change in links, relay state or wanted peers (peers.js `follow`): send owed
@@ -1732,8 +1751,11 @@ function followPeers() {
 // announces our key, and its members link to the reloaded tab.
 const savedRelayUrl = sessionStorage.getItem("shell.relayUrl");
 const savedRelaySecret = sessionStorage.getItem("shell.relaySecret");
-relayUrlInput.value = savedRelayUrl || defaultRelayUrl();
+relayUrlInput.placeholder = relayUrlHint();
+if (savedRelayUrl) relayUrlInput.value = savedRelayUrl;
 if (savedRelaySecret) relaySecretInput.value = savedRelaySecret;
+// The secret in force: the key's own unless one was set.
+myContactSecret = await peers.net(new OpArgs("contact")).then((s) => (s.length > 0 ? s : null));
 if (myContactSecret) contactInput.value = toHex(myContactSecret);
 let savedRooms = [];
 try { savedRooms = JSON.parse(sessionStorage.getItem("shell.rooms") ?? "[]"); } catch {}
@@ -1747,9 +1769,7 @@ if (followed.room) {
 }
 if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 for (const name of savedRooms) {
-  if (typeof name === "string" && ROOM_NAME_RE.test(name) && !peers.rooms.has(name)) {
-    peers.rooms.set(name, { id: await roomId(name), members: new Set() });
-  }
+  if (typeof name === "string" && ROOM_NAME_RE.test(name)) await peers.seatRoom(name);
 }
 updateContactHint();
 peers.roomsChanged();

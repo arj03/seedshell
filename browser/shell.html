@@ -181,7 +181,7 @@
     </label>
     <label class="field">
       Relay secret
-      <input id="relay-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="only for a private relay" />
+      <input id="relay-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="only for a private relay: 64 hex characters" />
     </label>
     <div class="row">
       <button id="connect-relay" class="primary" type="button">Connect</button>
@@ -197,8 +197,8 @@
         <ul id="room-list" class="app-list"></ul>
         <p class="hint subtle">You can be in several rooms at once, and are linked to everyone in
           each. <strong>Add peer</strong> beside someone in a room adds them to your peers
-          below: you stay linked whether or not you share a room. A room has no secret: whoever
-          has its name, or its link, can join. <strong>Random</strong> gives the name typed an
+          below: you stay linked whether or not you share a room. A room's secret is its name:
+          whoever has the name, or its link, can join, and the relay never sees it. <strong>Random</strong> gives the name typed an
           ending nobody can guess, for a room that should stay private.</p>
         <div class="row">
           <input id="relay-room" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false"
@@ -258,7 +258,7 @@
       </header>
       <div class="step-body">
         <input id="contact-secret" type="password" autocapitalize="off" autocomplete="off" spellcheck="false"
-               aria-label="My contact secret" placeholder="none: anyone with this node's key can connect" />
+               aria-label="My contact secret" placeholder="empty: open to anyone who reaches this node" />
         <div class="row">
           <button id="set-contact" type="button">Set</button>
           <button id="new-contact" type="button">New secret</button>
@@ -274,9 +274,10 @@
       neither a room's name nor a contact secret from one.</p>
     <p class="hint">Start a relay locally with <code>npm run relay</code>, or point at a
       public one your group trusts.</p>
+    <p class="hint">The <strong>relay URL</strong> names the relay's key, as the relay prints it when it
+      starts; the link to it is pinned to that key, and nothing on it names yours.</p>
     <p class="hint">A <strong>relay secret</strong> is the relay's own, not the room's: a relay started
-      with <code>--secret</code> serves only clients that prove it, and the proof never sends the
-      secret. Get it from whoever runs the relay; it is not part of any link. Leave it empty
+      with <code>--secret</code> serves only nodes that hold it, and it never crosses the wire. Get it from whoever runs the relay; it is not part of any link. Leave it empty
       for an open relay.</p>
   </div>
 

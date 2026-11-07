@@ -93,8 +93,9 @@ npm run relay
 npm run serve        # → http://localhost:3000/shell.html
 
 # 5. (optional) in a third: a radio in the room `global`, with a directory of FLAC and
-#    Ogg Vorbis files for whoever is in the room with jam to play from
-npm run radio -- ~/Music
+#    Ogg Vorbis files for whoever is in the room with jam to play from, on the relay
+#    address `npm run relay` printed
+npm run radio -- ~/Music --relay ws://<relay key>.<secret>@localhost:8080
 ```
 
 Open the page in two tabs or two browsers and join the same room in both on the
@@ -212,13 +213,18 @@ Chromium with a `SecurityError`, whatever the iframe's `allow` says. So the shel
 the media, and a view only says which conversation is open (`conv`, under
 [The view](#3-the-view-uihtml)).
 
-**Private relays.** A relay started with `--secret` (seedrelay's
-[Private relays](https://github.com/arj03/seedrelay#private-relays)) serves only
-clients that know its secret. Enter it in the **Relay secret** field on the Network
-tab. It belongs to the relay, not to a room or a node, so it is not part of any link: get
-it from whoever runs the relay. The room client and the transport each prove it with
-BLAKE2b and never send it; whoever sees a registration can still test guesses at it,
-so a relay's secret must be long and random.
+**Relay secrets.** A relay serves only nodes that hold its contact secret (seedrelay's
+[Private by default](https://github.com/arj03/seedrelay#private-by-default)), which its URL
+carries as it prints it, `ws://<relay key>.<secret>@host:port`. Paste the whole URL, or
+put the secret in the **Relay secret** field on the Network tab. It belongs to the relay,
+not to a room or a node, so get it from whoever runs the relay. The transport presents it
+in the handshake and never sends it. A relay started with `--open` has none, and is in
+public.
+
+**Contact secrets.** A node is gated too: the transport derives its contact secret from
+its key, so the shell answers only room-mates (each room's secret comes from its name) and
+whoever has its contact link. Emptying the **My contact secret** field opens it, which is
+being in public: anyone who reaches it is answered, and can make it do a handshake's work.
 
 Either way, identity is bound in-channel by the transport bundle's handshake, which
 runs end to end through the relay, so a relay can see which keys meet and refuse to
@@ -293,7 +299,7 @@ nick is a peer's own word.
 | Path | What it is |
 | --- | --- |
 | `browser/shell.*` | The browser shell: identity and nick, admission policy, the transport, the shell boot load and offers, the sockets the transport's WebRTC mesh runs over, the rooms, peers and contacts as it draws them, and a sandboxed iframe for each installed app. The inline import map in `shell.html` names the seedkernel surface. |
-| `browser/peers.js` | Who a shell is linked to, and why, with nothing of a page in it: the relay, its rooms and who is in each, the contacts, the nicks, the node's context as apps are told it, and the transport ops that follow from them (`welcome`, `addr`, `dial`, `forget`, `ice`). The page and the headless shell both follow their peers through it. |
+| `browser/peers.js` | Who a shell is linked to, and why, with nothing of a page in it: the relay, its rooms and who is in each, the contacts, the nicks, the node's context as apps are told it, and the transport ops that follow from them (`secrets`, `addr`, `dial`, `forget`, `ice`). The page and the headless shell both follow their peers through it. |
 | `browser/host-blob.js` | Fetches the vendored host blob from its own `<script>`, ahead of `shell.js`, so the download runs while `shell.js`'s imports load. |
 | `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
 | `browser/shell-app.js` | The shell app as the pages that load it speak to it: its three claims and the op that sends under each. `shell/v1` is what a page tells another about itself: `{ peer }`, that it added or removed the other as a peer, and `{ nick }`, what it calls itself; a `tell` answers whether the peer's page got it. `call/v1` is a call's signaling, and `offer/v1` an app one page offers another. The page tells them apart by the claim a frame arrived under. |
@@ -766,12 +772,12 @@ directory of music behind it for the room to play from. A peer need not be a bro
 jam's view cannot tell the radio from a tab, but that it says it has a library.
 
 ```sh
-npm run radio -- <music directory> [--room <name>] [--relay <ws://host:port>]
+npm run radio -- <music directory> --relay <ws://<relay key>.<secret>@host:port> [--room <name>]
                  [--relay-secret <secret>] [--nick <name>] [--key <file>]
 ```
 
-The room is `global` and the relay `ws://localhost:8080` unless named, which is where a
-tab of the shell is by default. It needs Node 22 or later, whose WebSocket it dials the
+The room is `global` unless named, as a tab of the shell's is by default. The relay's
+address names its key, as the relay prints it when it starts. It needs Node 22 or later, whose WebSocket it dials the
 relay with.
 
 **The headless shell** (`node/shell.mjs`) is the page less what only a person at one has a
@@ -847,7 +853,7 @@ What each one is and does is seedkernel's to document, in its
 What the shell builds on them:
 
 - **It drives the shipped transport by its ops**, through `Shell.call` on `_net`: `relay` to
-  register, `contact` for this node's contact secret, `welcome` for its room-mates, `addr`
+  register, `contact` for this node's contact secret, `secrets` for its rooms' secrets, `addr`
   for each peer it links to, `dial` to call one and hear whether it linked, `forget` for
   one it drops, and `ice` for the STUN a call's own connections ask. It follows the relay and its
   links through `onStatus`. The relay is seedrelay, which the shell meets rooms on with

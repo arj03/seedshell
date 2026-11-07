@@ -376,8 +376,8 @@ try {
   const [aRoutes, bRoutes] = await Promise.all([routesOf(A), routesOf(B)]);
   assert(aRoutes.get(peerB) === true && bRoutes.get(peerA) === true,
     "`routes` must answer each linked peer, and read a dialed link as direct");
-  // `[relay u8]`, then `[key 32][direct u8]` per linked peer.
-  assert(toldB?.length === 34 && toldB[0] === 0 && toHex(toldB.subarray(1, 33)) === peerA && toldB[33] === 1,
+  // `[0][relay u8]`, then `[key 32][direct u8]` per linked peer.
+  assert(toldB?.length === 35 && toldB[0] === 0 && toldB[1] === 0 && toHex(toldB.subarray(2, 34)) === peerA && toldB[34] === 1,
     "B must be told the same without asking, when A linked, behind its relay's state, which is none (`onStatus`)");
   ok("the transport answers how each peer is reached, and tells it when it changes");
 
@@ -764,8 +764,8 @@ async function handle(arg) {
 } catch (err) { fail("sends held to claims", err); }
 
 // 9. the transport ops the page's rooms and contacts rest on: `dial` is how a page calls a
-//    peer it wants linked, `ice` the STUN its own media connections ask, `welcome` names the
-//    room-mates, whose calls need no contact secret, and `forget` drops one peer and its
+//    peer it wants linked, `ice` the STUN its own media connections ask, `secrets` names the
+//    room secrets a caller may present instead of the contact secret, and `forget` drops one peer and its
 //    links, which is how leaving a room hangs up without touching anyone else.
 try {
   const dial = async (key) => (await A.call(NET_PROTO, new OpArgs("dial").blob(key).u32(2000).build()))[0];
@@ -773,15 +773,15 @@ try {
   assert(await dial(new Uint8Array(32).fill(4)) === 0, "and one to a key the transport has no address for, that it is not");
   const ice = JSON.parse(text(await A.call(NET_PROTO, new OpArgs("ice").blob(identityB.publicKey).build())));
   assert(Array.isArray(ice), "`ice` answers the ICE servers toward a peer, as RTCConfiguration JSON");
-  const welcomed = A.call(NET_PROTO, new OpArgs("welcome").blob(identityB.publicKey).build());
-  assert(welcomed !== null, "the transport answers `welcome`");
-  await welcomed;
-  assert((await peersOf(A)).includes(peerB), "welcoming a peer leaves its link up");
+  const secrets = A.call(NET_PROTO, new OpArgs("secrets").blob(new Uint8Array(32).fill(7)).build());
+  assert(secrets !== null, "the transport answers `secrets`");
+  await secrets;
+  assert((await peersOf(A)).includes(peerB), "naming room secrets leaves a link up");
   await A.call(NET_PROTO, new OpArgs("forget").blob(identityB.publicKey).build());
   await until(async () => !(await peersOf(A)).includes(peerB) && !(await peersOf(B)).includes(peerA),
     4000, "the forgotten peer's link to close at both ends");
-  ok("the transport dials one peer, names its STUN, welcomes room-mates, and forgets one peer without a reset");
-} catch (err) { fail("dial, ice, welcome and forget", err); }
+  ok("the transport dials one peer, names its STUN, takes room secrets, and forgets one peer without a reset");
+} catch (err) { fail("dial, ice, secrets and forget", err); }
 
 try { B.close(); } catch {}
 try { A.close(); } catch {}

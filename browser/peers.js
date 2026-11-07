@@ -8,8 +8,9 @@
 // Rooms belong to the shell, not the transport: we meet peers with seedrelay's room client
 // and hand their keys to the transport. There are two ways to be linked to a peer:
 //
-//   room      no secret. Joining means agreeing to link with every member. We can be in
-//             several. Room-mates are "welcomed", so they can call us without our secret.
+//   room      the room's secret, which everyone who knows its name holds. Joining means
+//             agreeing to link with every member. We can be in several, and answer
+//             whoever presents any of their secrets (the transport's `secrets`).
 //   contact   a single peer, by key, linked regardless of rooms. Calling it requires its
 //             contact secret, if it has one.
 //
@@ -17,8 +18,12 @@
 // to be answered at all. With none set, anyone can call.
 
 import { OpArgs } from "seedkernel-wasm/op-frame";
-import { roomClient, roomId } from "seedrelay/rooms";
+import { roomClient, roomId, roomSecret } from "seedrelay/rooms";
 import { NET_PROTO, contextJson, toHex, fromHex } from "./app-api.js";
+
+/** The most rooms whose secrets the transport answers to (seedkernel's `secrets`), and the
+ *  most a relay seats one link in. */
+const MAX_ROOM_SECRETS = 16;
 
 /** Maximum nick length, ours or a peer's. */
 export const MAX_NICK = 32;
@@ -36,14 +41,13 @@ const EMPTY = new Uint8Array(0);
 
 export class Peers {
   /**
-   * `shell` is the node, `identity` its keypair, `sodium` the crypto used to sign room-client
-   * messages. `tell(key, bytes)` sends a shell/v1 notice and resolves to whether the peer's
+   * `shell` is the node, `identity` its keypair. `tell(key, bytes)` sends a shell/v1 notice and resolves to whether the peer's
    * shell got it. Callbacks: `changed()` whenever peer state may have changed;
    * `onRooms(renamed)` when room membership changed (`renamed` if the set of rooms did too);
    * `onRefused(name)` when the relay refused a room, which is then left.
    */
-  constructor({ shell, identity, sodium, tell, changed = () => {}, onRooms = () => {}, onRefused = () => {} }) {
-    Object.assign(this, { shell, identity, sodium, tell, changed, onRooms, onRefused });
+  constructor({ shell, identity, tell, changed = () => {}, onRooms = () => {}, onRefused = () => {} }) {
+    Object.assign(this, { shell, identity, tell, changed, onRooms, onRefused });
     this.me = toHex(identity.publicKey);
     /** This node's nick, or "". */
     this.nick = "";
@@ -103,23 +107,24 @@ export class Peers {
 
   // ── the transport ──────────────────────────────────────────────────────────
 
-  /** Handle the transport's status bytes (`onStatus`): `[relay u8]`, then
-   *  `[key 32][direct u8]` per linked peer. */
+  /** Handle the transport's status bytes (`onStatus`), which the room client reads too:
+   *  `[0][relay u8]`, then `[key 32][direct u8]` per linked peer, or `[1]` and what the
+   *  relay told this node, which is the room client's alone. */
   status(status) {
-    this.relayState = status[0];
+    this.relay?.client.status(status);
+    if (status[0] !== 0) return;
+    this.relayState = status[1];
     this.linked = new Map();
-    for (let off = 1; off + 33 <= status.length; off += 33) {
+    for (let off = 2; off + 33 <= status.length; off += 33) {
       this.linked.set(toHex(status.subarray(off, off + 32)), status[off + 32] === 1);
     }
     this.follow();
   }
 
-  /** Bring the transport in line with who we want linked, for `keys` or everyone. Room-mates
-   *  are "welcomed" (they need no contact secret to call us), wanted peers get an address,
-   *  and others have theirs cleared. */
+  /** Bring the transport in line with who we want linked, for `keys` or everyone: wanted
+   *  peers get an address, and others have theirs cleared. */
   sync(keys) {
     const mates = this.mates();
-    void this.netOp(new OpArgs("welcome").blob(fromHex([...mates].join(""))));
     const want = (key) => mates.has(key) || this.contacts.has(key);
     for (const key of keys ?? new Set([...this.wanted.keys(), ...mates, ...this.contacts.keys()])) {
       if (!want(key)) this.wanted.delete(key);
@@ -129,11 +134,12 @@ export class Peers {
     this.follow();
   }
 
-  /** Tell the transport how to reach `key`: the contact secret to present (none for a
-   *  room-mate) and the relay to dial through. Unwanted keys, or any key while we're on no
-   *  relay, get an empty destination, so the transport won't dial them. */
+  /** Tell the transport how to reach `key`: the secret to present (a room we share with it,
+   *  else its contact secret) and the relay to dial through. Unwanted keys, or any key
+   *  while we're on no relay, get an empty destination, so the transport won't dial them. */
   teach(key) {
-    const secret = this.roomsOf(key).length > 0 ? null : this.contacts.get(key);
+    const [room] = this.roomsOf(key);
+    const secret = room !== undefined ? this.rooms.get(room).secret : this.contacts.get(key);
     void this.netOp(new OpArgs("addr").blob(fromHex(key)).blob(secret ?? EMPTY)
       .text(this.relay && this.wanted.has(key) ? `relay+${this.relay.origin}` : ""));
   }
@@ -212,19 +218,16 @@ export class Peers {
 
   // ── the relay and its rooms ────────────────────────────────────────────────
 
-  /** Connect to the relay at `origin` (`relaySecret` for a private one): register the
-   *  transport, then join every room. Resolves once registration succeeds or fails. */
+  /** Connect to the relay at `origin` (`ws[s]://<key>@host[:port]`, `relaySecret` in hex for
+   *  a private one): register the transport, then join every room. Rooms travel on the
+   *  transport's own relay link (`tell`). Resolves once registration succeeds or fails. */
   async joinRelay(origin, relaySecret = null) {
     const fresh = this.relay?.origin !== origin || this.relay.relaySecret !== relaySecret;
     if (fresh) {
       // Closing the old client reports its rooms' members as leaving.
       this.relay?.client.close();
-      const { sodium, identity } = this;
       const client = roomClient({
-        relay: origin,
-        publicKey: identity.publicKey,
-        sign: (m) => sodium.crypto_sign_detached(m, identity.privateKey),
-        ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
+        tell: async (bytes) => (await this.net(new OpArgs("tell").blob(bytes)))[0] === 1,
         onMember: (room, key, present) => this.onMember(room, key, present),
         onRefused: (name) => {
           this.rooms.delete(name);
@@ -260,10 +263,19 @@ export class Peers {
     await this.netOp(new OpArgs("relay").text(""));
   }
 
+  /** Hold a seat for room `name`, with its id and secret, and no members yet: false when it
+   *  is already held. Nothing is told; `joinRoom` is the whole join. */
+  async seatRoom(name) {
+    if (this.rooms.has(name)) return false;
+    const [id, secret] = await Promise.all([roomId(name), roomSecret(name)]);
+    if (this.rooms.has(name)) return false;
+    this.rooms.set(name, { id, secret, members: new Set() });
+    return true;
+  }
+
   /** Join room `name`, in addition to any others. */
   async joinRoom(name) {
-    if (this.rooms.has(name)) return;
-    this.rooms.set(name, { id: await roomId(name), members: new Set() });
+    if (!(await this.seatRoom(name))) return;
     this.roomsChanged();
     await this.relay?.client.join(name);
   }
@@ -278,8 +290,12 @@ export class Peers {
     this.hangUpUnwanted(before);
   }
 
-  /** The set of joined rooms changed: recompute who is wanted. */
+  /** The set of joined rooms changed: answer whoever holds one of their secrets, and
+   *  recompute who is wanted. A relay seats a link in at most MAX_ROOM_SECRETS rooms, which
+   *  is also as many as the transport takes. */
   roomsChanged() {
+    const secrets = [...this.rooms.values()].slice(0, MAX_ROOM_SECRETS).map((r) => toHex(r.secret));
+    void this.netOp(new OpArgs("secrets").blob(fromHex(secrets.join(""))));
     this.onRooms(true);
     this.sync();
   }
