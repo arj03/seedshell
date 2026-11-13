@@ -1,6 +1,6 @@
 // Chat's module — rooms and direct chats, text and images (jpeg).
 //
-// A pure-transform handler (seedkernel PROTOCOL §4): the host stages the input at
+// A pure-transform handler (seedkernel §4): the host stages the input at
 // `scratch`, calls `handle`, and reads the render bytes back from `scratch`. No host
 // import, no signer query, no UI bridge — the app's guest puts the sender identity in front
 // (the caller it was handed, which the AKE channel authenticated), and the render bytes are
@@ -25,7 +25,7 @@ const PK_LEN: i32 = 32;
 const SCRATCH_SIZE: i32 = 0x40000; // 256 KB — input (pk‖type‖body) + render output
 
 export let scratch: i32 = 0;
-// Declare the larger I/O region to the host (seedkernel PROTOCOL §4.1) so a big
+// Declare the larger I/O region to the host (seedkernel §4.1) so a big
 // image plus its render header is not capped at the 128 KB default.
 export const scratchSize: i32 = SCRATCH_SIZE;
 scratch = heap.alloc(SCRATCH_SIZE) as i32;

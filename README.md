@@ -571,7 +571,7 @@ Rooms and peers are named by id in hex, as the context names them.
 ### 4. Modules: pure compute, optional
 
 A pure WASM transform the guest calls by name, with no I/O and no authority. Its ABI is
-seedkernel's ([PROTOCOL §4](https://github.com/arj03/seedkernel/blob/main/docs/PROTOCOL.md#4-the-wasm-module-abi)); chat's module
+seedkernel's ([BUNDLE §4](https://github.com/arj03/seedkernel/blob/main/docs/BUNDLE.md#4-the-wasm-module-abi)); chat's module
 asks for a larger scratch region than the default, for images.
 
 ### Building it
