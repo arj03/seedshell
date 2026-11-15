@@ -28,14 +28,10 @@ const ASK_HASH = 3;      // [bytes]   the block id of these bytes, which is the 
 /** A render beside the pipe's, for the view. */
 const RENDER_BLOCK = 2;  // [from 32][room 32][id 32][bytes]  a peer's block, with its id
 
-/** A block's id: the BLAKE2b-256 of its bytes. `crypto/blake2b` takes
- *  `[outLen][keyLen][key][msg]` and is ungated, a transform rather than a grant (seedkernel
- *  §12.1). */
+/** A block's id: the SHA-256 of its bytes. `crypto/sha256` is ungated, a transform rather
+ *  than a grant (seedkernel §12.1). */
 function blockId(bytes) {
-  const arg = new Uint8Array(2 + bytes.length);
-  arg[0] = 32;
-  arg.set(bytes, 2);
-  return host.call("crypto/blake2b", arg);
+  return host.call("crypto/sha256", bytes);
 }
 
 /** A PEER's block is hashed before it is passed on, so the view files it under what it is

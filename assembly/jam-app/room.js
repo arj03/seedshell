@@ -43,7 +43,7 @@
 //
 // AUDIO is the file's own bytes, never a copy made of them. A FLAC or Ogg Vorbis file is cut
 // where its format lets a piece be decoded without the rest (formats.js), and each piece is
-// a block, named by the BLAKE2b-256 of its bytes. A track lists its blocks, how many samples
+// a block, named by the SHA-256 of its bytes. A track lists its blocks, how many samples
 // each holds (`lens`), the block every piece is decoded behind (`head`), and for Ogg Vorbis
 // how much of the piece before goes in front of each when it is decoded (`pre`). So a block
 // needs no trust in who sent it: our guest hashes what arrives, and one that is not the

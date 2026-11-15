@@ -679,7 +679,7 @@ titles it has a library of (`library`), if it has one.
 
 **Audio** is the file's own bytes: nothing is re-encoded, on the way in or on the way
 out. A file is cut into pieces that each decode without the rest (`jam-app/formats.js`),
-of at most 256 KB or five seconds, and each piece is a block, named by the BLAKE2b-256 of
+of at most 256 KB or five seconds, and each piece is a block, named by the SHA-256 of
 its bytes.
 
 - A **FLAC** file is a header and then frames, and every frame decodes on its own, so a

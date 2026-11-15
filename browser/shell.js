@@ -156,7 +156,7 @@ const sodium = host.sodium;
 // Digests (`bundleDigest`) of bundles the user has just consented to. `admit` consumes one
 // per install. Consent, not an author allow-list, is this shell's gate.
 const pendingApprovals = new Set();
-/** seedkernel's BLAKE2b-256 hash. */
+/** seedkernel's SHA-256 hash. */
 const digest = (bytes) => genesisHash(sodium, bytes);
 // Contact notices still to send, key hex → true (added) / false (removed). Sent once the
 // peer is linked (`tellPeers`).

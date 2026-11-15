@@ -577,12 +577,12 @@ try {
 
   // A block of the size the view cuts audio into, told to one member.
   const block = Uint8Array.from({ length: 128 * 1024 }, (_, i) => (i * 31 + (i >> 8)) & 255);
-  const id = toHex(sodium.crypto_generichash(32, block));
+  const id = toHex(sodium.sha256(block));
   await jamA.invoke(writeOp(APP_OP_UI, concat([ASK_TELL], identityB.publicKey, pipeFrame(ROOM, [BLOCK], block))));
   await until(() => jamRenders.length >= 2, 4000, "jam's block");
   const got = jamRenders[1];
   assert(got[0] === 2 && toHex(got.slice(1, 33)) === peerA && toHex(got.slice(33, 65)) === ROOM, "a block is drawn with its sender and room");
-  assert(toHex(got.slice(65, 97)) === id, "a block is named by the BLAKE2b-256 of its bytes, by the guest that received it");
+  assert(toHex(got.slice(65, 97)) === id, "a block is named by the SHA-256 of its bytes, by the guest that received it");
   assert(got.length === 97 + block.length && toHex(got.slice(97)) === toHex(block), "a 128 KB block arrives whole");
   // The same name from the sender's own guest, which is how a track's block list is made.
   // It is the answer to the view's call, with nothing in front of it.
