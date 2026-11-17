@@ -53,11 +53,26 @@ Open the page in two tabs, join the same room on the **Network** tab in both, an
 | `npm run smoke` | Headless test: two shells, the real apps, an upgrade in place, offers and call signals. Run it after every seedkernel update. |
 | `npm run e2e` | The page in a real headless Chrome, Edge or Chromium, two tabs and a relay. Run it after a change to the shell or an app's view. |
 | `npm run clean` | Deletes `browser/vendor/`. |
+| `npm run package` | Writes the current build to `release/`: the page as `seedshell-<version>.zip`, and `chat.skb`, `jam.skb` and `hello.skb`. |
+| `npm run release` | Builds from clean checkouts, runs both tests, packages, tags `v<version>` and opens a draft GitHub release. |
 
 The first build mints the author key `chat-author.key`, and a `<app>-author.version` file
 per app. **Back them up together.** Bundles signed under a new key are a different author,
 so peers can no longer upgrade in one click from your earlier ones, and a lost version
 file restarts the count at 1.
+
+## Deploying
+
+The page is static files, with the seedkernel runtime vendored in. Unzip
+`seedshell-<version>.zip` from a
+[release](https://github.com/arj03/seedshell/releases/latest), or the one `npm run
+package` writes, on any web server, and open `seedshell/` over HTTPS. Its users also need a [seedrelay](https://github.com/arj03/seedrelay) they can reach over `wss://`.
+The release carries the apps as their own files: download one and drop it on the **Apps**
+tab.
+
+The page pins the shell's boot bundle to the author who built it, and a release ships
+the `host-web.skb` that seedkernel published: `npm run release` downloads it from
+seedkernel's release and vendors it in place of the one a checkout signs.
 
 ## Using the shell
 

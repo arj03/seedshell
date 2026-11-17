@@ -12,7 +12,9 @@
     "smoke": "node scripts/smoke.mjs",
     "e2e": "node scripts/e2e.mjs",
     "serve": "npm run vendor && npx --yes http-server browser -p 3000 -c-1",
-    "clean": "node scripts/clean.mjs"
+    "clean": "node scripts/clean.mjs",
+    "package": "node scripts/package.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "seedkernel-wasm": "file:../seedkernel/WASM",
