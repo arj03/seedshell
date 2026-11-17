@@ -1,929 +1,173 @@
 # seedshell: an app shell, and its apps, for [seedkernel](https://github.com/arj03/seedkernel)
 
-Two things live here, and the line between them is the point.
+seedshell is a browser page that hosts seedkernel apps. The **shell** owns what is the
+same for every app: this node's identity and nick, the relay, rooms, peers and contacts,
+installing and offering apps, and calls. It knows nothing about what any app does.
 
-The **shell** (`browser/shell.*`) is a browser page that hosts apps. It owns what is
-the same for every app: this node's identity and nick, the relay, rooms, peers and
-contacts, installing and offering apps, and calls. It knows nothing about what any app
-does. Seedkernel has a `Shell` of its own, the node assembly its host's `standUp` returns
-(§12.8, §12.9): that one lives in seedkernel, and this page is built around it.
+An **app** is a signed bundle (`.skb`) that carries everything of its own: a confined JS
+**guest** that is its behaviour, an HTML **view** the shell runs in a sandboxed iframe,
+and any pure WASM modules the guest drives. The shell passes bytes between a view and its
+guest and reads none of them, so a new version of an app is a new bundle, and the shell
+does not change. The apps here:
 
-An **app** is a signed bundle that carries everything of its own: a confined JS **guest**
-that is its behaviour, an HTML **view** the shell runs in a sandboxed iframe, and any
-**pure-transform** WASM modules the guest drives. The shell passes bytes between a view
-and its guest and reads none of them, so a new version of an app is a new bundle and
-nothing else: the shell does not change. Two apps are here, and the shell that hosts one
-is the shell that hosts the other. **Chat** is text and images, in rooms and in direct
-chats. **Jam** stands beside it, under its own label and protocol: a room's chat with
-emoji reactions, and a playlist the room keeps and plays together, FLAC and Ogg Vorbis
-files streamed from peer to peer as they are. **Hello** is the least an app can be, an
-`app.json` and a page, and the one to copy to [write another](#writing-an-app).
+| App | What it is |
+| --- | --- |
+| **Chat** | Text and images, in rooms and in direct chats. |
+| **Jam** | A room's chat with emoji reactions, and a playlist the room keeps and plays together: FLAC and Ogg Vorbis files streamed from peer to peer as they are. |
+| **Hello** | The least an app can be, an `app.json` and a page, and the one to copy. |
+| **Radio** | A jam room member with no page, run from a console with a directory of music behind it. |
 
-A smaller app rides alongside as the **boot bundle**, pinned to the exact author and app
-the page was built with: **shell** (`assembly/shell-app/`), how one page talks to another:
-what each tells the other about itself under `shell/v1`, a call's signaling under
-`call/v1`, and a peer's signed bundle under `offer/v1` (the app an Offer would install is
-the thing the Offer is offering, so until someone accepts it there is no app to route it
-to).
+Peers meet on a [seedrelay](https://github.com/arj03/seedrelay) and move to WebRTC when
+they can. The shell lives outside the seedkernel repo because an app is a consumer of the
+runtime, not part of it: it reaches seedkernel only through the published entry points of
+`seedkernel-wasm` (seedkernel's
+[CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md) guide).
 
-A second shell stands beside the first. `node/shell.mjs` is a node with no page, which
-hosts one app from a console, and the **radio** (`assembly/radio-app/`) is the app written
-for it: a member of a jam room with a directory of music behind it, which whoever is in the
-room looks through from jam, and plays from. Its bundle is another one than jam's, and
-claims the same protocol.
-
-This lives outside the seedkernel repo for the same reason
-[seedstore](https://github.com/arj03/seedstore) does: an app is a *consumer* of
-the runtime, not part of it. The seedkernel repo stays runtime-only, and every reach
-the shell makes into the runtime goes through a published entry point of
-`seedkernel-wasm`: see seedkernel's
-[CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md) guide.
-
-**Contents:** [Quick start](#quick-start) · [Using the shell](#using-the-shell) ·
-[What's here](#whats-here) · [Writing an app](#writing-an-app) · [The chat app](#the-chat-app) ·
-[The jam app](#the-jam-app) · [The radio](#the-radio) · [Protocol interop](#protocol-interop) ·
-[The seedkernel surface the shell uses](#the-seedkernel-surface-the-shell-uses) ·
-[Troubleshooting](#troubleshooting)
+More in [docs/](docs/): [APPS](docs/APPS.md) (writing an app, and chat's wire),
+[JAM](docs/JAM.md) (jam and the radio) and [ARCHITECTURE](docs/ARCHITECTURE.md) (trust
+model, files, and the seedkernel surface).
 
 ## Quick start
 
-### Prerequisites
-
-- **Node.js ≥ 22.**
-- **Sibling checkouts** of [seedkernel](https://github.com/arj03/seedkernel) and
-  [seedrelay](https://github.com/arj03/seedrelay) (the relay server `npm run relay`
-  starts). Both are `file:` dependencies (`../seedkernel/WASM`, `../seedrelay`), so the
-  layout must be:
-
-  ```
-  some-dir/
-  ├── seedkernel/
-  ├── seedrelay/
-  └── seedshell/    ← this repo
-  ```
-
-### Build and run
+It needs Node ≥ 22 and checkouts of seedkernel and seedrelay beside this one, which it
+uses as `file:` dependencies (`../seedkernel/WASM`, `../seedrelay`).
 
 ```sh
-# 1. build the seedkernel checkout it depends on (transport bundle + host + minified,
-#    and the host blob that carries the realm engine and the host's crypto)
 cd ../seedkernel/WASM && npm install && npm run build
-
-# 2. build the apps (chat, jam, hello and the radio, + the shell boot bundle) and
-#    vendor the runtime
 cd ../../seedshell && npm install && npm run build
-
-# 2b. (optional) headless check that the shell still works against this seedkernel:
-#     two shells, the real chat app, a message round-trip, an upgrade in place,
-#     a page notice, a call signal and an offer round-trip
-npm run smoke
-
-# 2c. (optional) the same in a real browser: two tabs of the shell and a relay,
-#     through install, an offer, chat, an app replaced in place, a call and a
-#     reload, then jam beside chat with a FLAC file added in one tab and streamed
-#     to the other, and a radio in the room whose library a tab plays from. Needs
-#     Chrome, Edge or Chromium.
-npm run e2e
-
-# 3. the relay where peers meet and link before moving to WebRTC (the transport bundle
-#    joins it; once peers are on WebRTC, killing it leaves them linked)
-npm run relay
-
-# 4. in another terminal: re-vendor + serve browser/ with caching off
-npm run serve        # → http://localhost:3000/shell.html
-
-# 5. (optional) in a third: a radio in the room `global`, with a directory of FLAC and
-#    Ogg Vorbis files for whoever is in the room with jam to play from, on the relay
-#    address `npm run relay` printed
-npm run radio -- ~/Music --relay ws://<relay key>.<secret>@localhost:8080
+npm run relay        # the relay; prints its URL
+npm run serve        # in another terminal: http://localhost:3000/shell.html
 ```
 
-Open the page in two tabs or two browsers and join the same room in both on the
-**Network** tab. Then load an app (below) in each: chat, jam, or both. With a
-[radio](#the-radio) in the room, one tab with jam is enough to hear something.
+Open the page in two tabs, join the same room on the **Network** tab in both, and drop
+`bundle/chat.skb` (or `jam.skb`, or `hello.skb`) on the **Apps** tab of each.
 
 | Script | What it does |
 | --- | --- |
-| `npm run build` | Signs every app and the shell boot bundle, then vendors the runtime. |
-| `npm run build:apps` | Signs each directory under `assembly/` with an `app.json` into `bundle/<app>.skb` (`chat.skb`, `hello.skb`, `jam.skb`, `radio.skb`, `shell.skb`), compiling chat's AssemblyScript module on the way, and writes the boot bundle beside the page as `browser/shell-bundle.js`. `npm run build:apps -- assembly/jam-app` signs just the one. |
-| `npm run vendor` | Copies the built seedkernel host, its host blob (QuickJS and the host's crypto) and seedrelay's room client into `browser/vendor/`. |
-| `npm run smoke` | Headless regression test (needs `npm run build` first). Run it after every seedkernel update. |
-| `npm run e2e` | The shell in a real headless browser, two tabs and a relay (needs `npm run build` first). Run it after a change to the shell or an app's view. |
-| `npm run relay` | Starts the `seedrelay` relay on port 8080, with STUN on UDP 3478 and 3479. |
-| `npm run radio -- <dir>` | Starts a [radio](#the-radio): a node with no page, in a room on the relay, with the music under `<dir>` for its library (needs Node 22 or later, and `npm run build` first). |
-| `npm run serve` | Re-vendors, then serves `browser/` on port 3000 with caching disabled. |
+| `npm run build` | Signs every app under `assembly/` into `bundle/<app>.skb`, and the shell's boot bundle, then vendors the runtime. |
+| `npm run build:apps` | Signs the apps only. `npm run build:apps -- assembly/jam-app` signs just one. |
+| `npm run vendor` | Copies the built seedkernel host, its host blob and seedrelay's room client into `browser/vendor/`. |
+| `npm run relay` | Starts a seedrelay on port 8080, with STUN on UDP 3478 and 3479. |
+| `npm run serve` | Re-vendors, then serves `browser/` on port 3000 with caching off. |
+| `npm run radio -- <dir>` | Starts a [radio](#the-radio) on a directory of music. |
+| `npm run smoke` | Headless test: two shells, the real apps, an upgrade in place, offers and call signals. Run it after every seedkernel update. |
+| `npm run e2e` | The page in a real headless Chrome, Edge or Chromium, two tabs and a relay. Run it after a change to the shell or an app's view. |
 | `npm run clean` | Deletes `browser/vendor/`. |
+
+The first build mints the author key `chat-author.key`, and a `<app>-author.version` file
+per app. **Back them up together.** Bundles signed under a new key are a different author,
+so peers can no longer upgrade in one click from your earlier ones, and a lost version
+file restarts the count at 1.
 
 ## Using the shell
 
-**Identity.** Each tab mints an Ed25519 identity and keeps it in `sessionStorage`,
-so closing the tab discards it. That is also why two tabs of the same browser are
-two distinct peers.
+**Identity and nick.** Each tab mints an Ed25519 identity and keeps it in
+`sessionStorage`, so two tabs are two peers and closing a tab discards its identity. *My
+nick* on the **Network** tab is what the node calls itself to its peers and their apps. It
+is a peer's own word: the key is what the channel authenticated.
 
-**Nick.** *My nick* on the **Network** tab is what this node calls itself. Each linked
-peer's shell is told it, shows it in place of the key, and hands it to every app it runs,
-so a name is the same in every app and needs none installed. It is a peer's own word, not
-proof of who it is: anyone can take any nick, and the key is what the channel
-authenticated.
+**Apps.** Drop a `.skb` on the **Apps** tab to install it, or a newer one of an installed
+app to upgrade it. The row is the permission prompt: who wrote the app, the protocols it
+**serves** and what it **reaches** (the network, a keyspace of its own, a timer), read off
+its signed manifest. A bundle reaching for anything else is refused. **Open** puts an app's
+view in front. A node holds six apps beside the shell's own two bundles. What an app
+stores lasts until the tab is reloaded.
 
-**Loading an app.** On the **Apps** tab, pick or drop `bundle/chat.skb`, or
-`bundle/jam.skb` or `bundle/hello.skb`, which install beside chat. The browser only
-verifies the bundle's signature and admits it under the shell's consent policy; it never
-signs anything itself. Dropping a newer `.skb` of an app you already have is how you
-upgrade it. Each installed app has a view of its own;
-**Open** on its row puts it in front. A node holds eight bundles at once, and the shell's
-own take two of them (the transport and the boot bundle), so six apps can be installed
-side by side. An app's `fs` keyspace lives in the page's memory, so what an app keeps
-there lasts until the tab is reloaded; the bundles themselves are kept for the tab and
-installed again.
+**Offers.** Peers hand each other bundles. An offer shows the same row, is verified
+against its author's signature, and installs on one click. It waits only as long as the
+page.
 
-**Offers.** Peers hand each other bundles under `offer/v1`; the recipient
-re-verifies the original author's manifest signature. An Offer is installed on one
-click, so the recipient checks what the bundle asks for before showing that click, and
-the row says it: the protocols it **serves**, and what it **reaches** (see the [trust model](#trust-model)). A signature says
-who wrote a bundle, not what it may reach. The signed `guest.requires` list is where
-that is written down, host services and co-resident guests alike, and this shell grants
-an app at most the network (`_net`), a keyspace of its own (`fs`) and a wake (`timer`).
-A bundle reaching for anything else, such as the node's signing key or the sockets, is
-not installed (`appFacts` in `browser/app-api.js`). Consent names the whole bundle,
-guest and view included, so an update that changes only an app's behaviour is a new
-offer, and a consent to one bundle admits no other. A peer has at most eight offers
-waiting here at once, and one that is not a bundle this shell runs is dropped as it
-arrives. An offer waits only as long as the page: a reload drops what was not accepted.
+**Rooms.** **Connect** puts the node on the relay in the URL field; **Join** joins a room
+(`global` if none is typed), connecting first if needed. Anyone with a room's name can
+join it, so **Random** gives a name an ending nobody can guess. Each room has a **Copy
+link** (`…/shell.html#room=<name>`) and a **Leave**. The relay sees a hash of each name,
+never the name.
 
-**Rooms, contacts and the contact secret.** On the **Network** tab, **Connect** puts
-this node on the relay in the URL field, where its key can be called. That needs no room.
-The button then reads **Disconnect**, which leaves the relay: rooms keep their names for
-the next Connect, the links they were the reason for close, and a contact already linked
-stays linked. From the relay there are two ways to be linked to a peer, and one gate:
+**Contacts.** A contact is a peer you link to by key, room or not: **Add peer** beside a
+room-mate, or under the Peers list with a contact link. **Remove peer** undoes it at both
+ends. The node's **contact secret** gates who may call it: a caller who shares no room
+with you must present it, and a wrong one is refused silently. **Copy contact link** gives
+`…#pk=<key>&s=<secret>`. Emptying the field makes the node public. Links carry what they
+share in the URL fragment, which browsers never send.
 
-- A **room** has no secret. Joining one is agreeing to be linked to everyone in it, and
-  you can be in several at once: type a name and press **Join** (with none typed, the
-  default `global`), which also connects a node that is on no relay yet. Whoever has a
-  room's name can join it, so **Random** gives the name typed an ending nobody can guess,
-  `cats-5c1e…`, shown as `cats`. Each room lists the other peers in it, and has a
-  **Copy link** (`…/shell.html#room=<name>`) and a **Leave**; leaving closes only the
-  links that room was the reason for. The relay keeps no list of rooms a client could
-  read, and sees a hash of each name, never the name.
-- A **contact** is one peer you link to directly, by its key, whether or not you share a
-  room. The Peers list holds them, not your room-mates, each by its nick if it has set
-  one and by its key otherwise. It is easiest with someone you share a room with:
-  **Add peer** beside them in the room's list makes them a contact, as sending them a
-  direct message does. For anyone else, **Add peer** under the Peers list takes a contact
-  link, or a key with its contact secret if it has one. Either way the other end is told
-  once it is linked, and lists you as its peer too; **Remove peer** undoes it at both ends.
-- The **contact secret** (*My contact secret*) is this node's own. With one set, a caller
-  who is not in a room with you must present it to be answered at all; a wrong or missing
-  one is refused silently, and shows on the caller's side as `no answer`. Your room-mates
-  never need it. **Copy contact link** gives `…#pk=<your key>&s=<your secret>`.
+**Relay secrets.** A relay takes only nodes that hold its secret, which the URL it prints
+carries: `ws://<relay key>.<secret>@host:port`. Paste the whole URL, or put the secret in
+**Relay secret**. Get it from whoever runs the relay. The relay forwards only ciphertext.
 
-Links carry what they share in the URL fragment, which browsers never send over the
-network. A room message goes only to that room's members, and a direct message only to its
-addressee.
+**Calls.** The call bar on the **App** tab is the shell's: **Start call** rings the
+conversation open in the app (a room's linked members, or one peer), and the bar names
+who that is. A peer receives nothing until it presses **Accept call**. **Mute** and **Stop
+video** work separately. The page holds the media, since a sandboxed view cannot be
+granted a camera or microphone.
 
-**Calls.** The call bar above the app on the **App** tab is the shell's, not the app's.
-**Start call** starts a call with the conversation open in the app: a room's linked
-members, or the one peer of a direct chat. With no app shown, or one that never says which
-conversation is open, a call is with every linked peer. Which conversation is open is the
-app's word, and it is your camera and microphone that go there, so the shell says who that
-is itself: with no call on, the call bar names who one started now would ring.
+**Direct or relayed.** The Peers list shows each peer as `direct` once its link moved to
+WebRTC, or `via relay`. The peer pill in the top bar turns green once every link is
+direct.
 
-Those peers are only told of the call. Each one's bar says who is calling, and offers
-**Accept call** and **Decline**; until it accepts, a peer receives nothing of the call
-and sends nothing, since media is negotiated only between two nodes that are both in it.
-Accepting enters that call, whatever conversation is open. A call turned down, or hung up
-on, does not ring again while it lasts; it can still be entered with **Start call** from
-its conversation.
-
-Starting or accepting a call asks for the microphone and the camera together and
-publishes both, and each then has its own button. **Mute** silences the microphone, which
-stays captured, and **Unmute** brings it back. **Stop video** lets the camera go, and
-**Start video** asks for it again. A call the browser gives neither to (permission
-refused, or no camera) goes on all the same with both off, **Unmute** then asking for the
-microphone alone and **Start video** for the camera.
-
-Media rides peer connections the page owns, one per peer, beside the transport's and
-asking the same STUN servers, which the transport names for each peer (its `ice` op). Their signaling rides the node's authenticated channel,
-so a call needs no relay once the peers are linked, and nobody on the relay can inject
-into one.
-
-A call is the shell's because an app cannot hold one. A view's sandbox gives it an opaque
-origin, which cannot be granted the camera or microphone: `getUserMedia` fails there in
-Chromium with a `SecurityError`, whatever the iframe's `allow` says. So the shell holds
-the media, and a view only says which conversation is open (`conv`, under
-[The view](#3-the-view-uihtml)).
-
-**Relay secrets.** A relay serves only nodes that hold its contact secret (seedrelay's
-[Private by default](https://github.com/arj03/seedrelay#private-by-default)), which its URL
-carries as it prints it, `ws://<relay key>.<secret>@host:port`. Paste the whole URL, or
-put the secret in the **Relay secret** field on the Network tab. It belongs to the relay,
-not to a room or a node, so get it from whoever runs the relay. The transport presents it
-in the handshake and never sends it. A relay started with `--open` has none, and is in
-public.
-
-**Contact secrets.** A node is gated too: the transport derives its contact secret from
-its key, so the shell answers only room-mates (each room's secret comes from its name) and
-whoever has its contact link. Emptying the **My contact secret** field opens it, which is
-being in public: anyone who reaches it is answered, and can make it do a handshake's work.
-
-Either way, identity is bound in-channel by the transport bundle's handshake, which
-runs end to end through the relay, so a relay can see which keys meet and refuse to
-forward, but can never read the traffic or impersonate a peer. WebRTC signaling rides the
-peers' own authenticated link, so no relay or room member sees SDP or candidates.
-
-**Direct or relayed.** The Peers list on the **Network** tab shows how each of them is
-reached: `direct` once its link has moved to WebRTC, `via relay` while the relay still
-forwards it, which is where a link stays when no direct one can be made. The peer pill
-in the top bar counts every link, room-mates' too, says how many are relayed, and turns
-green once every link is direct.
-
-**Other devices.** `localhost` is a secure context, so plain HTTP is enough for WebRTC
-when both tabs are on this machine. Reaching the shell from another device needs HTTPS
-(and a relay URL that device can reach; `wss://` if the page is served over HTTPS).
+**Other devices.** `localhost` is a secure context, so plain HTTP is enough on one
+machine. Another device needs the page over HTTPS and a relay it can reach (`wss://`).
 
 ## Trust model
 
-**An app is trusted code, as a browser extension is.** Installing one is the decision, and
-the row on the Apps tab is the permission prompt: who wrote it, the protocols it **serves**
-and what it **reaches**, all read off its signed manifest. Dropping a file, or clicking
-install on an Offer, says you trust that author with what the row lists. The shell does not
-try to contain an app that misuses what it was granted; it keeps the row true, and it
-treats peers, who are not asked, as strangers.
-
-**What installing an app grants.** Its guest runs with the grants in `requires`:
-
-- `_net`, the network: it sends to any peer this node is linked to, as this node, under the
-  protocols it claims and no other, and receives the frames of those protocols.
-- `fs`, a keyspace of its own in the one storage backend the shell runs.
-- `timer`, one wake.
-
-Its view is part of the app and is granted nothing of its own. Every app is also told the
-context: this node's rooms (with the ids that join them), the linked peers, the contacts and
-each peer's nick.
-
-**What the shell enforces, so that the row is true:**
-
-- An app cannot reach the node's signing key or the sockets, and a bundle that asks is not
-  installed (`appFacts`, `browser/app-api.js`).
-- A consent names the whole bundle, guest and view, so an update that changes behaviour is a
-  new consent, and a bundle from a different author under an installed label asks first.
-- A view reaches nothing but its own guest: no request of any kind, no WebRTC, no frame it
-  can run script in (`browser/view-guard.js`). So an app that did not ask for `_net` has no
-  network through its view either. The doors a view has to the shell are held to what the
-  row already says: it may make a contact only of a peer the node knows, and the call bar
-  says who a call would ring, since the camera and microphone go there.
-- Each claim has one owner on a node, and the shell's own, `offer/v1`, `shell/v1` and
-  `call/v1`, are held by the app it pinned at boot. An app sends only under the protocol ids it claims, so it
-  cannot write another app's messages, or the shell's own, as you (seedkernel §12.10); an app
-  that needs a second id claims it.
-
-**What it does not defend against.** An app with `_net` can:
-
-- claim a protocol id before the app that would use it is installed, and receive what peers
-  send under it;
-- fill the shared storage or the send queue, and so starve every other app, or spend what
-  its CPU and memory budgets allow;
-- read every room, peer and nick in the context, and hand them to any peer it is linked to;
-- carry a display name that looks like another app's. The row also shows its id and the
-  start of its author's key.
-
-So install apps from authors you trust, as you would an extension, and remove one you no
-longer do. Removing an app drops its claims and stops it, and its stored keys stay under
-its label for whatever is installed there next. **Peers are strangers.** What a peer sends
-is attributed to the key the channel authenticated and is nothing more: the receiving guest
-decides what to draw, an offer is verified, bounded and installed only by a click, and a
-nick is a peer's own word.
-
-## What's here
-
-| Path | What it is |
-| --- | --- |
-| `browser/shell.*` | The browser shell: identity and nick, admission policy, the transport, the shell boot load and offers, the sockets the transport's WebRTC mesh runs over, the rooms, peers and contacts as it draws them, and a sandboxed iframe for each installed app. The inline import map in `shell.html` names the seedkernel surface. |
-| `browser/peers.js` | Who a shell is linked to, and why, with nothing of a page in it: the relay, its rooms and who is in each, the contacts, the nicks, the node's context as apps are told it, and the transport ops that follow from them (`secrets`, `addr`, `dial`, `forget`, `ice`). The page and the headless shell both follow their peers through it. |
-| `browser/host-blob.js` | Fetches the vendored host blob from its own `<script>`, ahead of `shell.js`, so the download runs while `shell.js`'s imports load. |
-| `browser/app-api.js` | The contract between the shell and any app, in one place: the contract version, what an app may reach, what the shell reads off a signed manifest (`appFacts`), the digest a consent names, and the two ops the shell calls on an app's guest. The shell gates and drives every bundle through it, and the builder refuses to sign what it would refuse. |
-| `browser/shell-app.js` | The shell app as the pages that load it speak to it: its three claims and the op that sends under each. `shell/v1` is what a page tells another about itself: `{ peer }`, that it added or removed the other as a peer, and `{ nick }`, what it calls itself; a `tell` answers whether the peer's page got it. `call/v1` is a call's signaling, and `offer/v1` an app one page offers another. The page tells them apart by the claim a frame arrived under. |
-| `assembly/shell-app/` | The shell app's source, built like any app: an `app.json` with `"boot": true`, which the page loads at boot by its pin rather than a user installing it, and its guest, which hands what a peer sent under any of its claims to the page and puts the page's own on the wire. |
-| `browser/view-guard.js` | What holds a view to its sandbox: `guardView` makes the page a view is loaded as, the author's own with a Content Security Policy in front that lets it make no request, and a prelude, the one script that policy lets the parser run, which takes WebRTC out of the realm and then runs the view's scripts. See [The view](#3-the-view-uihtml). |
-| `browser/media-rtc.js` | The call feature: `MediaCalls`, one `RTCPeerConnection` per peer that the page owns, beside the transport's, with perfect negotiation signaled over `call/v1`. A node in a call tells its peers so (`{ call }`), and a connection is opened only between two that have each said they are in the same one. Live media is the page's own; the host holds only the transport's connections. |
-| `assembly/chat-app/` | Chat: text and images, in several rooms and in direct chats. `app.json` says what the bundle is, `guest.js` is its guest, which holds the chat wire vocabulary and decides who each frame is for, `index.ts` is its module, the one transform that draws a frame, and `ui.html` its view, with the view's CSS and JS in files of their own (`ui.css`, `ui.js`) beside the page. |
-| `assembly/jam-app/` | Jam: a room's chat, emoji reactions, and a playlist kept and played together. Its guest is the room pipe, to which `guest.js` adds a name for each block of audio, its hash. `room.js` is a member of a room with nothing to show for it: the room's state, how two copies of it agree, and the audio served; the view (`ui.html`, `ui.css`, `ui.js`) is that with a page in front, which plays the room and looks through a library. `formats.js` finds where a FLAC or Ogg Vorbis file may be cut, and there is no module. See [The jam app](#the-jam-app). |
-| `assembly/hello-app/` | Hello: the least an app can be, and the one to copy. Its `app.json` names a label, the contract and a view, and its guest is the room pipe, which the builder gives an app that names none. The view (`ui.html`, `ui.js`) casts what is typed to the first room the node is in, and shows what the room's members cast. |
-| `assembly/radio-app/` | The radio: a member of a jam room with no page and a library. `app.json` is a bundle of its own, claiming `jam`, whose guest is jam's and which has no view. `head.js` is what stands in front of that guest instead: jam's `room.js`, and a library answered from a directory. See [The radio](#the-radio). |
-| `node/shell.mjs` | The headless shell: a node with no page, hosting one app whose head is plain script it runs, behind the door a view has to its guest. It owns the identity, the nick, the relay, the rooms and the links, as the page does, and has no contacts, offers or calls. |
-| `node/radio.mjs` | The radio, as it is started: the directory it is pointed at as a library of titles, a key file, and the headless shell running `bundle/radio.skb` with the radio's head. |
-| `assembly/guest-lib/net.js` | Guest source any guest that reaches the network puts in front of its own: the transport's `send` op, and keys as hex. Every app and the boot bundle use it. |
-| `assembly/guest-lib/context.js` | Guest source for a guest whose frames are written to rooms: the shell's two ops by name, the rooms and the linked peers read out of the node's context, the context passed on to the view as render type 0, and the entrypoint, which tells a peer's frame from the view's bytes so a guest is written as what it does with each (`guest.peer`, `guest.view`). Chat, jam, hello and the radio use it. |
-| `assembly/guest-lib/room-pipe.js` | A guest, whole: a pipe scoped to a room, for an app whose state lives in its view. What the view casts goes to the room's linked members, what it tells goes to one of them, and a peer's frame is passed on only from a member of the room it names. An app that needs no more names no guest, and is given this one, as hello is. Jam builds on it. |
-| `assembly/view-lib/app.js` | View source any view puts in front of its own: bytes as hex, and the door to the shell as one object, `app`. A call to the guest is a promise of its answer, and `cast`, `tell` and `onFrame` are the view's half of the room pipe. Every view here uses it. |
-| `scripts/app-source.mjs` | Reads an app directory (`app.json` and what it names) into what gets signed: what an `app.json` leaves out filled in, a view's stylesheets and scripts put into its page, and a module written in AssemblyScript compiled. The builder and the smoke test share it. |
-| `scripts/build-app-bundle.mjs` | The offline bundle author: signs every app directory under `assembly/`, or the ones it is named, into `bundle/<app>.skb` under `chat-author.key`, tracking a monotonic freshness mark per app label in `<app>-author.version`. A boot bundle is also written beside the page as a module (`browser/<app>-bundle.js`). |
-| `scripts/author.mjs` | The author key and each app's version count, which the builder signs through: its first run mints the key. |
-| `scripts/vendor.mjs` | Copies seedkernel's built host (`build-min`: `host/` + `services/`) into `browser/vendor/seedkernel/`, plus seedkernel's host blob without its script (`build/host-web.skb`: the QuickJS realm engine and the host's crypto) and seedrelay's room client (`rooms.mjs`). Refuses a stale seedkernel build. |
-| `scripts/smoke.mjs` | Headless regression test: boots two shells over the transport bundle's channel seam, round-trips messages through the real chat app and the shell's two ops, replaces it in place with a later build, round-trips a page notice, a call signal and an offer through the shell app, each under its own claim, carries a frame and a block of audio through jam's guest, a cast and a tell through hello, whose guest is the room pipe and nothing else, and puts the radio's bundle where jam stood on one shell, to hear the other's jam. |
-| `scripts/e2e.mjs` | Browser regression test, for what the smoke test cannot reach: the page and the apps' views. Serves `browser/`, starts the `seedrelay` dependency, and drives two tabs of a headless Chrome, Edge or Chromium over the DevTools pipe: install by drop, rooms, nicks, an offer, messages, an app replaced in place by a bundle dropped over it, a direct message, a call that reaches its peer only once accepted, with a microphone muted and a camera turned off and on again, and one turned down, removing an app, and a reload. Then hello beside chat, a line from one tab shown in the other, and removed. Then jam beside chat: a message and a reaction, a FLAC file added in one tab, downloaded in the other and streamed to it, a seek, the list moving on, a peer held to an uplink slower than its track plays, the list reordered and trimmed, a reload that gets the room and its music back from the other tab, and a tab left alone in the room. Then what a view may not do: each app's view tries a request, a socket, a peer connection and a script in a frame of its own, against a server that must hear nothing, then a script that names a file on the page's own server, and asks for a contact the node has never met. Then one tab removes the other as its peer and hangs up, and the other still hears of it. Last the radio, started on a directory the test fills: a tab finds its library, searches it, has titles put in the list and plays one, fetched from the radio, and after a reload gets the room back from the radio alone. When the radio goes, its tracks cannot be played and the room passes over them, and a radio started again on the same directory serves them again. The FLAC files it writes itself. It adds no Ogg Vorbis file, which only an encoder can make. |
-| `scripts/clean.mjs` | Deletes `browser/vendor/` when a rebuild isn't taking. |
-
-What the shell reads of an app (its name, version, description and view) rides in the
-bundle's **signed manifest**, under `guest.config.shell`. That entry is **this shell's
-convention, not a runtime contract**: the host hands `guest.config` to the guest and
-reads none of it. Nothing is read out of a module, so an app needs none.
-
-### Generated and local files (all gitignored)
-
-| Path | What it is |
-| --- | --- |
-| `bundle/` | Signed bundles: `chat.skb`, `hello.skb`, `jam.skb`, `radio.skb`, `shell.skb`. |
-| `browser/vendor/` | The vendored runtime the page loads. |
-| `browser/shell-bundle.js` | The boot bundle embedded as a JS module, since the page is served from `browser/` and `bundle/` is not. |
-| `chat-author.key` | The author signing key, minted on the first build. |
-| `chat-author.version`, `hello-author.version`, `jam-author.version`, `radio-author.version`, `shell-author.version` | Each app label's version high-water mark. |
-| `radio.key` | A radio's node key, minted the first time one is started, so it is the same peer the next time. |
-
-**Back up `chat-author.key` and the `.version` files together.** The key *is* the
-author identity: bundles signed under a new key are a different author, so peers
-can no longer upgrade in one click from your earlier bundles. The version files
-live beside the key rather than in `bundle/` so that wiping build output never
-resets the count. If the key exists but a version file is missing, the build warns
-and restarts at 1; put the last version you shipped back in the file before
-publishing anything.
-
-### Section references in the source
-
-Comments across this repo cite seedkernel sections as bare `§N` (e.g. `§12.4`). Seedkernel
-numbers them globally across its docs, and [its README](https://github.com/arj03/seedkernel/blob/main/README.md#the-rest-of-the-spec)
-says which file holds each.
+**An app is trusted code, as a browser extension is.** Installing it is the decision. The
+shell keeps the consent row true: an app cannot reach the node's signing key or the
+sockets, its view can make no request of its own, and it sends only under the protocols it
+claims. It does not contain an app that misuses what it was granted, so install apps from
+authors you trust. **Peers are strangers**: what one sends is attributed to its
+authenticated key and nothing more. The full model is in
+[ARCHITECTURE](docs/ARCHITECTURE.md#trust-model).
 
 ## Writing an app
 
-Anything the shell installs has the same parts, and `browser/app-api.js` is the whole of
-what it and the shell agree on. Hello (`assembly/hello-app/`) is the least an app can be,
-and the one to copy. Chat (`assembly/chat-app/`) is the reference for an app with a guest
-of its own and a module. Jam (`assembly/jam-app/`) is one with no module, whose state lives
-in its view and whose guest is little more than the room pipe.
-
-Hello is an `app.json` and a page:
+Copy `assembly/hello-app/`, give the copy its own label in `app.json`, and run
+`npm run build`:
 
 ```json
 { "app": "hello", "api": 3, "ui": "ui.html" }
 ```
 
-It names no guest, so its guest is the room pipe. Its view (`ui.js`) talks to the room
-through one object, `app`: `onContext` for who and where, `cast` to a room, `onFrame` for
-what the room's members cast, and `ready()` once it is listening. A cast goes to the linked
-members of a room, a frame is heard only from a member of the room it names, and what a
-room holds is the view's to keep.
-
-To start another app, copy `assembly/hello-app/` beside it, give the copy a label of its
-own (`app`), and run `npm run build`. Every directory under `assembly/` with an
-`app.json` is signed into `bundle/<app>.skb`, the file to drop on the **Apps** tab of two
-tabs in one room. The rest of this section is what those files stand on, for an app that
-needs more.
-
-### 1. `app.json`: what the bundle is
-
-One file beside the app's sources. Every path in it is relative to it, and only `app` and
-`api` must be there. Chat's:
-
-```json
-{
-  "app": "chat",
-  "api": 3,
-  "name": "Chat",
-  "version": "v2",
-  "description": "text + images, rooms and direct chats",
-  "guest": ["../guest-lib/net.js", "../guest-lib/context.js", "guest.js"],
-  "ui": "ui.html",
-  "modules": { "chat": "index.ts" }
-}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `app` | The label the app installs under, `[A-Za-z0-9_-]{1,64}`. A node holds one app per label, and the label is also its storage and signing scope. A bundle under a label already installed upgrades or replaces that app (see [Protocol interop](#protocol-interop)). |
-| `api` | The version of the shell contract the app was built for. The shell refuses any other by name, so a bundle from before a contract change is never installed and left silent. |
-| `name`, `version`, `description` | What the app's row in the shell says. The name is the label unless given. |
-| `protocols` | The protocol ids the app claims. A peer's frame under one of them reaches its guest, and they are the only ids its guest may send under. The builder tells the guest them too, as `APP.protocols`, since a guest is handed its config and not its manifest's claims. Left out, the one id the label spells, which is what chat and jam claim. |
-| `requires` | Everything its guest reaches: `_net` (the network), `fs` (a keyspace of its own), `timer` (one wake). The shell grants nothing else, and the consent row shows the list. Left out, `_net`. |
-| `guest` | The guest's source files, joined in order behind seedkernel's op-frame. A library two apps share is one more path. Left out, the guest is the room pipe: the three files in `assembly/guest-lib/`, which are a guest by themselves. |
-| `ui` | The view, an HTML page, with any stylesheets and scripts it names. Left out for an app with nothing to show. |
-| `modules` | Pure WASM modules, by the name the guest calls each: a built `.wasm`, or an AssemblyScript entry (`.ts`), which the builder compiles. May be left out. |
-
-`npm run build:apps` signs it, with every other app. The name, version,
-description and view go into the signed manifest (`guest.config.shell`), so they are
-vouched for by the same key as the code.
-
-### 2. The guest: the app's behaviour
-
-Confined JS with one entrypoint, `handle(bytes)`, and one way out, `host.call(name,
-bytes)` (seedkernel §12.2). The shell hands it three things and reads none of the
-answers. Each answer goes to the view, or is nothing.
-
-| Caller | `handle` receives | Sent | Its answer |
-| --- | --- | --- | --- |
-| A peer | `[sender 32][frame …]` under a protocol the app claims. The sender's key is put in front by the transport once the channel has authenticated the peer; the guest never verifies anything. | When the frame arrives. | **Render bytes**, for the view. |
-| The shell, op `ctx` | `[zero 32][3]["ctx"][JSON]`: the node's context, below. | After the install, when the context changes, and when the view says it is ready. | Render bytes too. |
-| The shell, op `ui` | `[zero 32][2]["ui"][bytes …]`: whatever the app's own view posted with `call`. | When the view calls. | The **answer** to that call. |
-
-The 32-byte caller id tells a peer from the shell, and `callerOf`/`readOp` from
-seedkernel's op-frame split both. `assembly/guest-lib/context.js` does that once, as the
-`handle` of any guest that names it, so a guest is written as what it does with each
-caller:
-
-```js
-guest.peer = (caller, frame) => …;   // a peer's frame: render bytes, or EMPTY
-guest.view = async (bytes) => …;     // the view's call: its answer, or EMPTY
-```
-
-The context it keeps itself: the rooms a guest decides with (`inRoom`), and all of it
-passed on to the view as render type 0. To send, a guest calls `_net` (`netSend` in
-`assembly/guest-lib/net.js`); to draw, it calls its own module by name, or builds the
-bytes itself.
-
-`assembly/guest-lib/room-pipe.js` sets both, and is a guest whole. A frame on the wire is
-`[room 32][body]` under the app's first protocol, and the pipe reads the room and never
-the body:
-
-| What the view asks (`ui`) | |
-| --- | --- |
-| `[1][frame]` cast | The frame goes to every linked member of its room. |
-| `[2][to 32][frame]` tell | The frame goes to one member of its room. |
-
-| What it renders | |
-| --- | --- |
-| `[0][context JSON]` | The node's context (`context.js`). |
-| `[1][from 32][frame]` | A peer's frame, passed on only if the relay lists its sender in the room it names. |
-
-An app that needs more than the pipe lists a guest file of its own behind it and sets
-`guest.peer` or `guest.view` again, handing the rest to `pipePeer` and `pipeView`. Jam's
-does: it hashes a block of audio on its way in, and answers one more ask.
-
-An answer to a peer's frame is **render bytes and nothing else**. The shell hands every
-one to the view (seedkernel's `onInbound`), so a guest that answered a peer's request with
-the reply itself would be drawing that reply on its own page. An app that asks a peer for
-something therefore has the peer send it back as a frame of its own, which is how jam moves
-audio. Asking its own guest is another matter: what a guest answers the `ui` op goes back
-to the call the view made, which is how jam's view learns what a block is called.
-
-The **context** is UTF-8 JSON, with every key and room id in lowercase hex and every list
-in order, so the same context is always the same bytes. A guest reads it with the op-frame
-prelude's `utf8Decode`, since its realm has no `TextDecoder`:
-
-```json
-{
-  "api": 3,
-  "me": "<this node's key>",
-  "nick": "<what this node calls itself, or empty>",
-  "rooms": [{ "id": "<room id>", "name": "cats", "members": ["<key>"] }],
-  "linked": ["<key>"],
-  "contacts": ["<key>"],
-  "nicks": { "<key>": "<what that peer calls itself>" }
-}
-```
-
-It is the shell's to know and the same for every app: rooms are joined on the Network
-tab, and a nick is set there. A contact's secret is never in it. A view hears it as
-`app.onContext`, and `app.nameOf(key)` reads a peer's nick out of the last one.
-
-### 3. The view: `ui.html`
-
-An HTML page, signed and loaded as one self-contained document. It can be written as
-several files: a `<link rel="stylesheet" href="ui.css">` or a `<script src="ui.js"></script>`
-naming a file by its path from the page is replaced by that file's text when the bundle is
-built (`readView` in `scripts/app-source.mjs`), so the page opens in a browser as it stands
-and travels as one. Nothing else can be named: there is no file beside a view once it is
-running. Chat's view is three files and the view library, and jam's has a second script
-beside its own.
-
-The shell loads it into an iframe sandboxed `allow-scripts allow-forms
-allow-downloads` from a `blob:` URL, so it has no access to the page's keys. A view may
-hand the user a file it has put together, as a link to a blob of its own, which is how
-jam saves a track; it reads and writes nothing on disk.
-
-A view reaches nothing but its guest. What an app reaches is what its guest reaches, which
-is on its consent row; a view is granted nothing, and the shell holds it to that
-(`browser/view-guard.js`). The page loaded is the author's with two things put in front:
-
-- **A Content Security Policy of its own**, `default-src 'none'` and little given back.
-  No request leaves a view: no `fetch`, no WebSocket, no image, stylesheet or font from
-  anywhere, no form sent, no script that names a file. What it shows is its own inline
-  styles, images and media it holds as `data:` or `blob:`, and fonts as `data:`. It may
-  run WASM, and a worker made from a blob.
-- **A prelude**, the one script the policy lets the parser run. It takes
-  `RTCPeerConnection` out of the page, since a peer connection asks whatever server its
-  script names and no policy governs that, and then runs the view's own scripts, where
-  they stood and in order.
-
-So a view is written with these in mind:
-
-- Its scripts run as the page is parsed, as written, but they are run by the prelude and
-  not the parser. An **inline handler** (`onclick="…"`) and a `javascript:` URL are the
-  parser's and do not run: listen with `addEventListener`. A script the view makes itself
-  (`document.createElement("script")`) runs if it carries its code; one that names a file
-  loads nothing, and nor does `import()` or a worker's `importScripts`.
-- There is **no WebRTC** in a view, and no frame it makes gets one: a frame inherits the
-  policy, so nothing runs in it but the same prelude.
-- Nothing outside the bundle can be loaded, a font or a script from a CDN included. What
-  a view needs travels in it.
-
-One thing is left that no policy stops: a `<link rel="preconnect">` or `dns-prefetch` opens
-a connection to, or looks up, a name of the view's choosing. Nothing is sent on it but the
-name, and the name is the view's to choose: so a view can tell a server it names a little
-at a time, and hears nothing back.
-
-The same opaque
-origin is refused the camera and microphone, which is why a call is the shell's. Nor will a
-media element there load a `blob:` URL: in Chromium an `<audio>` given one stalls without
-an error, so a view that plays audio decodes it with Web Audio, as jam's does. Each
-installed app has its own, kept until the app is removed or replaced. It talks to the
-shell only via `postMessage`:
-
-| Direction | Message | Meaning |
-| --- | --- | --- |
-| view → shell | `{ type: "ready" }` | Sent once on load. The shell tells the guest the context, hands the view that answer, then flushes any renders queued while it loaded. |
-| view → shell | `{ type: "call", id: integer, bytes: Uint8Array }` | Bytes for the app's own guest (its `ui` op). The shell does not read them. `id` is the view's to choose, and comes back on the answer. |
-| shell → view | `{ type: "answer", id, payload: Uint8Array }` | What the guest answered that call, which may be nothing. Every call is answered: one whose guest failed gets `{ type: "answer", id, error: string }` instead. |
-| shell → view | `{ type: "render", payload: Uint8Array }` | Render bytes the app's guest answered: to a peer's frame, or to the context. The format is the app's. |
-| view → shell | `{ type: "conv", room?: hex, to?: hex }` | The conversation now open, a room or one peer, or neither for none. A call started from the shell is with it; an app that never says calls every linked peer. |
-| view → shell | `{ type: "contact", peer: hex }` | Make a peer a contact, so the link to it outlives any shared room. Only of a peer the node shares a room with or is linked to, which are the ones a view is told of: a key from anywhere else is refused, and is the user's to add on the Network tab. |
-
-So a view learns of rooms, peers and nicks from its own guest, as a render, and the two
-never hold different pictures.
-
-A view need not write any of that. `assembly/view-lib/app.js`, named in a script tag ahead
-of the view's own (`<script src="../view-lib/app.js"></script>`), is the same door as one
-object, with `toHex`, `fromHex` and `concat` beside it:
-
-| | |
-| --- | --- |
-| `app.ready()` | The view is listening. |
-| `app.call(...parts)` | The parts, end to end, for the guest. A promise of its answer, rejected if the guest failed. |
-| `app.onRender(fn)` | `fn(bytes)` for each render. |
-| `app.onContext(fn)` | `fn(ctx)` for the context, which is taken out of what `onRender` hears. |
-| `app.conv({ room })`, `app.conv({ to })`, `app.conv()` | The conversation now open. |
-| `app.contact(peer)` | Make a peer a contact. |
-| `app.cast(room, ...parts)` | With the room pipe: a frame to every linked member of a room. |
-| `app.tell(room, to, ...parts)` | With the room pipe: a frame to one member of it. |
-| `app.onFrame(fn)` | With the room pipe: `fn(from, room, body)` for a peer's frame, taken out of what `onRender` hears. |
-
-Rooms and peers are named by id in hex, as the context names them.
-
-### 4. Modules: pure compute, optional
-
-A pure WASM transform the guest calls by name, with no I/O and no authority. Its ABI is
-seedkernel's ([BUNDLE §4](https://github.com/arj03/seedkernel/blob/main/docs/BUNDLE.md#4-the-wasm-module-abi)); chat's module
-asks for a larger scratch region than the default, for images.
-
-### Building it
-
-`npm run build` signs every app under `assembly/`, and `npm run build:apps` does that
-alone, without the vendored runtime. One app is signed by naming its
-directory:
-
-```sh
-npm run build:apps -- assembly/my-app      # → bundle/<its label>.skb
-```
-
-A module named by its AssemblyScript entry is compiled on the way, in memory, so there is
-no compiler config to write and no step to run first. There is no in-browser signing: anyone
-installing a custom app builds their own `.skb`. Admission trust is purely "did I
-consent to install this bundle", never "did I sign it as myself".
-
-## The chat app
-
-Text and images, written to a room or to one peer. All of it is in `assembly/chat-app/`.
-
-**A frame** is `[type u8][body …]`, the same bytes on the wire, from the view to the
-guest, and into the module. The shell never reads one.
-
-| `type` | Body |
-| --- | --- |
-| `0x03` / `0x04` direct text / image | `[to 32][content]` |
-| `0x05` / `0x06` room text / image | `[room 32][content]`, `room` the room's id on the relay |
-
-A message is written to a room or to one peer, never to everyone linked. A node can be in
-several rooms at once, so a room message names its room.
-
-**The guest** (`chat-app/guest.js`) does three things with a frame. Its own, from
-the view, it sends to the linked members of the frame's room, or to the one peer a direct
-frame names. A peer's it draws only if it is for this node: a room frame from someone the
-relay lists in that room, or a direct one addressed to this node. A frame of a type it
-does not speak is not drawn. And either way it has the module draw the frame, and answers
-what was drawn: a peer's frame as a render, and the view's own as the answer to the call
-that sent it, which is the local echo.
-
-**What the view draws** is one of:
-
-```
-[0][context JSON]                       the node's context, passed on for the view
-[type u8][pkLen u8][pk …][body …]       a frame as the module drew it
-```
-
-A sender's nick is not in a frame or a render. It is the shell's, and the view reads it
-out of the context.
-
-## The jam app
-
-A room's chat, emoji reactions on what is said, and a playlist the room keeps and plays
-together. It follows [seedstore](https://github.com/arj03/seedstore)'s split into two
-planes: small frames that say what the room agrees on, and blocks of audio that are named
-by their hash and so need no trust in whoever sent them.
-
-**A frame** is the room pipe's, `[room 32][type u8][body]`, under the protocol id `jam`.
-
-| `type` | Body | For |
-| --- | --- | --- |
-| `1` DOC | JSON | A part of the room's state, or all of it |
-| `2` WANT | block ids, 32 bytes each | Send me these blocks |
-| `3` NACK | block ids | I do not have these |
-| `4` BLOCK | the bytes of one block | A block that was asked for |
-| `5` FIND | JSON `{ q, from }` | The titles in your library that match these words |
-| `6` FOUND | JSON `{ q, from, total, titles }` | These, of that many |
-| `7` PICK | JSON `{ path, id }` | Put this title in the room's list, as the track `id` |
-| `8` MISS | JSON `{ id, why }` | It was not put there, and why |
-
-**The guest** is the room pipe (`guest-lib/room-pipe.js`), which reads the room of every
-frame: one its view *casts* goes to the linked members of the frame's room, one it *tells*
-goes to a single member, and a peer's frame is passed to the view only if the relay lists
-its sender in that room. `jam-app/guest.js` adds what a block is called. A BLOCK is hashed
-on the way in, so its render (`[2][from 32][room 32][id 32][bytes]`) carries the id this
-node's own guest gave those bytes, never the one the sender claimed. The view also asks it
-to name the blocks of a file being added (`[3][bytes]`, answered with the id), so the two
-never name a block two ways.
-
-**A member** of a room is `jam-app/room.js`: what the room agrees on, who else is jamming
-there, and the audio this node holds for it, with nothing drawn or sounded. The view
-(`jam-app/ui.js`) is that with a page in front of it, and adds what only a listener does:
-fetching the audio the room is playing, and sounding it. A node with no page keeps a room
-with the same file, which is what [the radio](#the-radio) is.
-
-**The room's state** is the member's, and is one document:
-
-```
-msgs    [{ by, id, n, at, text }]      added, never changed
-reacts  [{ t, e, by, on, n }]          per (target, emoji, peer), the latest n wins
-tracks  [{ id, by, n, title, codec, rate, ch, size, head, blocks, lens, pre,
-           pos, gone, v, vBy }]        what a track is never changes; pos goes to the
-                                       latest (v, vBy); gone, once set, stays set
-play    { v, by, id, pos, on }         what is playing: the latest (v, by) wins
-```
-
-Every change is a smaller document of the same shape, merged the same way whoever sent it
-and however often. `n` and `v` are a clock the room shares: a change takes one more than
-the highest its author has seen. So a newcomer is caught up by being sent the state, a
-change heard twice changes nothing the second time, and two peers that move the same track
-at once end up agreeing on one of the moves. A node asks each linked member for the state
-when it first sees it (`hello`), which is also what brings a reloaded tab back. The answer
-ends with what the member says of itself: the tracks it holds all of (`have`), and how many
-titles it has a library of (`library`), if it has one.
-
-**Audio** is the file's own bytes: nothing is re-encoded, on the way in or on the way
-out. A file is cut into pieces that each decode without the rest (`jam-app/formats.js`),
-of at most 256 KB or five seconds, and each piece is a block, named by the SHA-256 of
-its bytes.
-
-- A **FLAC** file is a header and then frames, and every frame decodes on its own, so a
-  piece is whole frames. A frame does not say how long it is: it ends where the next
-  begins, which is found by the next one's sync code and header and proved by the CRC-16
-  the frame ends with, since audio can hold bytes that read as a header.
-- An **Ogg Vorbis** file is pages, each saying how long it is and how many samples the
-  stream has reached, so a piece is whole pages, cut where no packet runs over. A Vorbis
-  packet is decoded against the one before it, so a piece is decoded with the last page of
-  the piece before it in front (`pre`), and the samples that page yields are dropped.
-
-A track lists its blocks, how many samples each holds (`lens`), and one more block that
-every piece is decoded behind (`head`): FLAC's STREAMINFO, or Vorbis's three header
-packets. Whoever added a track serves it from the file on disk, a slice at a time, and
-everyone who has fetched a track serves it too, so the one who added it can leave. Blocks
-are asked of any member that says it holds the track (`have`), a few at a time, and one
-that does not arrive is asked for again, of someone else if there is anyone.
-
-A track is a file to keep, too: **Download** on its row fetches whatever of it is not
-here yet, listening or not, and saves the head and then the pieces, end to end. The audio
-is the bytes that were added. An Ogg Vorbis track comes out as the file itself. A FLAC
-track comes out as the file's frames behind a STREAMINFO that says how long the stream is,
-without the tags and pictures the file carried, which no peer was sent.
-
-**Playing** is the room's, and listening is each node's own. `play` says which track,
-from where, and whether it is running, so play, pause, seek and skip are for everyone. A
-node that has tuned in asks first for the piece the room has reached, then the ones after
-it, and needs only those to sound: it comes in anywhere in a track as readily as at its
-start. Each piece is decoded by Web Audio into the samples it holds and set down on the
-audio clock at the sample the one before it stopped at, in a context that runs at the
-track's own sample rate. Decoded that way a piece is the same samples a decode of the
-whole file gives, and a node holds a few seconds of them however long the track. One that
-has not tuned in sees what is on and is nudged. When a track ends each node works out the
-next from the same list, and the one with the highest key says so first. A track nobody
-here holds, once every member has said what it holds, cannot be started and is passed
-over: one that is on when the last node holding it goes is over then.
-
-**Buffering.** The room's clock does not stop for a node whose blocks are slow, so a node
-does not start sounding until it will not run dry. It measures how fast blocks have been
-arriving and counts on four fifths of that.
-
-- *Faster than the track plays*, it starts once it holds four seconds ahead of the room,
-  which is what carries it over a link that stutters. From then on its lead only grows: it
-  goes on to fetch the rest of the track, and the one after it.
-- *Slower than the track plays*, sound started at once would stall. So it works out how
-  much it must hold for the rest to arrive in time, aims at the place in the track where
-  the room will be when it holds that much, and asks for pieces from there rather than
-  ones the room will have passed. It says when it will join, and from there plays to the
-  end of the track without a break.
-
-Until a block has arrived there is nothing to measure, so a node asks for little at first:
-what is asked for cannot be called back, and a slow link has to deliver all of it before
-anything asked for after. A peer that is still delivering is not given up on for being
-slow. And a track someone starts begins a second and a half later when not everyone holds
-it yet, so that the others have its opening by the time it sounds.
-
-**A library** is more music than a list is for: files a member has that no room has heard
-of, each a *title*, named by its path among them. A member that has one says how many
-titles it holds, and the list's **Library** button opens it in the list's place. What is
-typed there is asked of that member (FIND), which answers a page of the titles whose path
-holds every word (FOUND). Playing one, or adding it to the list, is asked of it too (PICK),
-with an id the asker chose: the member that has the file cuts it as any added file is cut,
-and adds the track to the room's list as its own, under that id, which is how the asker
-knows it when it comes. One it cannot add it says so of (MISS). Jam's view asks a library
-and has none; the radio has one. The radio keeps nothing between runs, so for a track in
-the list it does not hold it takes a title of the size the track says its file was, and
-holds the track again at once. The file is cut when its audio is first asked for, and a
-block it does not name is refused, so whoever asked looks elsewhere. Started again on its
-directory, the radio serves what it added before.
-
-What it does not do:
-
-- **Nothing is signed.** A frame is attributed by the channel it arrived on, and only
-  members of a room are heard, so the state is the members' to write. What one member
-  relays of another's messages is its own word for them.
-- **Nothing is kept.** The room's state and its audio live in the page, so they last as
-  long as someone in the room stays. A tab that reloads gets both back from the others; a
-  room everyone has left is empty when they return, unless a radio stayed in it.
-- **Only FLAC and Ogg Vorbis.** They are the two formats it knows how to cut. A file of
-  another kind is refused rather than converted: MP3, AAC and Opus could each be cut too,
-  and are not yet. A file is at most 512 MB.
-- **The room does not wait for a slow node.** One whose blocks come slower than a track
-  plays cannot hear all of it, whatever it does. It hears the later part of each track,
-  unbroken, rather than all of it in pieces.
+Every directory under `assembly/` with an `app.json` is signed into `bundle/<app>.skb`.
+Hello names no guest, so it gets the room pipe, and its view talks to the room through
+one object, `app`: `onContext`, `cast`, `onFrame`, `ready()`. Chat is the reference for an
+app with a guest and a module of its own. [APPS](docs/APPS.md) has the whole contract.
 
 ## The radio
 
-A member of a jam room with no page: a Node process that keeps a room as a tab does, with a
-directory of music behind it for the room to play from. A peer need not be a browser, and
-jam's view cannot tell the radio from a tab, but that it says it has a library.
+A jam room member with no page, with a directory of FLAC and Ogg Vorbis files for the
+room to play from. A room it is in keeps its chat and list after the last tab closes.
 
 ```sh
-npm run radio -- <music directory> --relay <ws://<relay key>.<secret>@host:port> [--room <name>]
-                 [--relay-secret <secret>] [--nick <name>] [--key <file>]
+npm run radio -- ~/Music --relay ws://<relay key>.<secret>@localhost:8080
+                 [--room <name>] [--relay-secret <secret>] [--nick <name>] [--key <file>]
 ```
 
-The room is `global` unless named, as a tab of the shell's is by default. The relay's
-address names its key, as the relay prints it when it starts. It needs Node 22 or later, whose WebSocket it dials the
-relay with.
-
-**The headless shell** (`node/shell.mjs`) is the page less what only a person at one has a
-use for. It holds the node's identity and nick, the relay, its rooms and who is in them,
-and the links to them, and hosts one app; it has no contacts, takes no offers and holds no
-calls. The app is a signed bundle like any other, admitted because whoever started the
-node named it, and its guest is driven through the same two ops as a page's. Where a view
-would stand is a *head*: plain script the shell runs, with the same door to the guest a
-view is given (`app.call`, `app.cast`, `app.tell`, `app.onFrame`, `app.onContext`). A head
-is the node's own program and is not confined. It reaches what it is handed beside the
-door, which is how the radio's comes by a directory.
-
-**The radio app** (`assembly/radio-app/`) is a bundle of its own, under its own label,
-which claims `jam` and whose guest is jam's: it speaks jam's protocol as jam does, and on a
-node it stands where jam would, since a claim has one holder. It has no view and no
-module. Its head (`head.js`) runs behind jam's `formats.js` and `room.js`, so it keeps a
-room the way a tab does: it answers a newcomer with the room's state, serves the audio it
-holds, and moves the room on when a track ends. A room it is in is still there, its chat
-and its list, when the last tab has closed. It listens to nothing, and so fetches nothing:
-a track a tab added is that tab's to serve, and theirs who have played it.
-
-**Its library** is every FLAC and Ogg Vorbis file under the directory, walked once when it
-starts, each a title named by its path ([A library](#the-jam-app) is how a member asks one).
-A path a peer names is looked up among the titles and never opened as it stands, and a
-symbolic link is not followed. Titles are cut one at a time, and only so many may wait.
-The radio keeps nothing between runs but its key (`radio.key`), so it is the same peer when
-started again, and it finds the files of the tracks the room lists again by their size.
-
-What it says of its rooms on the console, a nick or a track's title among it, is printed
-with no control characters, since a peer chose them and a terminal acts on them.
-
-What it does not do:
-
-- **No direct links.** Node has no WebRTC, so a link between the radio and a tab stays on
-  the relay, which forwards its encrypted bytes. seedkernel's UDP path reaches only other
-  console nodes, and the headless shell does not use it.
-- **One app.** A headless shell hosts the app it was started with, and nothing else.
-
-## Protocol interop
-
-A frame carries a *protocol id*, not an app name. An app's signed manifest claims
-its ids (`protocols` in its `app.json`; every chat app claims the one id `chat`), and
-installing an app is what routes them, so two peers running different authors'
-chat apps, or different versions of one, interoperate as long as both speak the
-protocol, and neither had to point anything at anything. A claim has one holder, so a
-node runs one chat app at a time, beside any apps that claim other ids. A second one
-under the same `app` label **replaces** the first: accept a peer's Offer and their app
-becomes the one this node chats with. The author's own next version upgrades in one
-click; a different author's app asks first, because it takes over the label's data and
-signing scope along with the slot (seedkernel §12.4). One under a different label is
-refused while the first holds `chat`: remove the first to install it.
-
-## The seedkernel surface the shell uses
-
-The shell reaches seedkernel only through published entry points of `seedkernel-wasm`.
-What each one is and does is seedkernel's to document, in its
-[CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md) guide; this is what the shell uses them for:
-
-| Import | Used for |
-| --- | --- |
-| `seedkernel-wasm` | `loadCrypto`, in the bundle builders, the radio and the smoke test |
-| `seedkernel-wasm/platform-web` | `browserPlatform`, the page's platform over the host blob |
-| `seedkernel-wasm/platform` | `platformHost`, the host the page's node is stood up by |
-| `seedkernel-wasm/host-web.skb` | The host blob without its script, vendored beside the page and read by the smoke test |
-| `seedkernel-wasm/shell-core` | `bootShell`, the headless shell's node |
-| `seedkernel-wasm/bundle` | `verifyBundle` on a dropped or offered bundle, and `genesisHash` for the digest a consent names |
-| `seedkernel-wasm/bundle-author` | Signing, in the offline builders only |
-| `seedkernel-wasm/net-ws`, `net-rtc`, `socket-seam` | The page's sockets: a WebSocket to the relay and WebRTC to peers, combined as `transport.channels`. The headless shell takes `net-ws` alone |
-| `seedkernel-wasm/fs-memory` | `MemoryFs`, the headless shell's store |
-| `seedkernel-wasm/op-frame` | `writeOp` and `OpArgs`, for calls into an app's guest and into the transport |
-| `seedkernel-wasm/transport-bundle` | `transportBundleBytes`, in the smoke and browser tests |
-
-What the shell builds on them:
-
-- **It drives the shipped transport by its ops**, through `Shell.call` on `_net`: `relay` to
-  register, `contact` for this node's contact secret, `secrets` for its rooms' secrets, `addr`
-  for each peer it links to, `dial` to call one and hear whether it linked, `forget` for
-  one it drops, and `ice` for the STUN a call's own connections ask. It follows the relay and its
-  links through `onStatus`. The relay is seedrelay, which the shell meets rooms on with
-  seedrelay's own room client.
-- **Its own claims are pinned.** `offer/v1`, `shell/v1` and `call/v1` belong to the shell
-  boot bundle, which `admit` allows only from the author and app the page was built with. Every other bundle goes through the consent gate.
-- **Both directions cross an app's guest.** A peer's frame reaches the page as the app
-  guest's answer, read off its load's `onInbound`; the page's own frames, Offers, what it
-  tells a peer's page and a call's signals leave through the app it pinned.
-- **Guest source spells `_net` and the transport's `send` op by hand**
-  (`assembly/guest-lib/net.js`), since a guest imports nothing. The smoke test runs them
-  against the shipped transport.
-
-The page's CSP has no `'unsafe-eval'`: the page imports the host and takes only the host
-blob's engine, crypto and transport, rather than evaluating the blob's script. It allows
-`'unsafe-inline'` because app views run in sandboxed `blob:` iframes that inherit the page's
-policy. The sandbox keeps a view from the page, and the policy each view is loaded under
-(`browser/view-guard.js`) keeps it from the network. The browser JS entry points are
-declared in two places, the imports at the top of `shell.js` and `peers.js` and the import
-map in `shell.html`, and nothing else in this repo reaches into `node_modules`. So a seedkernel
-change that breaks the shell broke a public export, which is the point of the shell living
-out here.
+The room is `global` unless named. Its key is kept in `radio.key`, so it is the same peer
+next time. Node has no WebRTC, so its links stay on the relay. How it works is in
+[JAM](docs/JAM.md#the-radio).
 
 ## Troubleshooting
 
-- **The shell fails in ways that look like seedkernel bugs after a rebuild.**
-  Almost always a stale cache. `npm run serve` passes `-c-1` for this reason: a
-  plain `http-server` defaults to `max-age=3600`, so the browser keeps serving an
-  old `vendor/seedkernel/host`. Hard-reload, and if a rebuild still doesn't take,
-  `npm run clean && npm run build` starts from nothing.
-- **`npm run vendor` refuses with a staleness error.** seedkernel's `build/` is
-  newer than its `build-min/`, which happens when you rerun its `tsc` without
-  minifying. Rerun `npm run build` in `../seedkernel/WASM`.
-- **`seedkernel-wasm not found`.** The sibling checkouts
-  are missing or misnamed; see [Prerequisites](#prerequisites).
+- **The shell fails in ways that look like seedkernel bugs after a rebuild.** A stale
+  cache. Hard-reload; `npm run serve` turns caching off. If a rebuild still doesn't take,
+  `npm run clean && npm run build`.
+- **`npm run vendor` refuses with a staleness error.** Rerun `npm run build` in
+  `../seedkernel/WASM`.
+- **`seedkernel-wasm not found`.** The sibling checkouts are missing or misnamed.
 - **`npm run smoke` can't find the boot bundle.** Run `npm run build` first.
-- **`npm run e2e` finds no browser.** It looks for Edge, Chrome or Chromium in their
-  usual places. Set `E2E_BROWSER` to the path of one installed elsewhere.
-- **Peers never appear.** Both tabs must use the same relay URL and be in the same room.
-- **A contact shows `no answer`.** It is offline or on another relay, or it has a contact
-  secret this node did not present, or presented wrongly, which is refused without any
-  error. Get its contact link, or its secret, enter the secret on its row and press
-  **Connect**. A room-mate needs no secret.
-- **The relay reads as unreachable, but it is running.** It may be private: a relay
-  started with `--secret` drops a client without its secret, or with another one.
-  Enter the relay's secret in the **Relay secret** field.
-- **A button in an app's view does nothing, or a font or image is missing.** A view runs
-  under a policy that lets it reach nothing (see [The view](#3-the-view-uihtml)). An inline
-  handler (`onclick="…"`) does not run, so listen with `addEventListener`; and nothing
-  loads from outside the bundle, so a view carries what it shows.
-- **Jam shows what is playing, with no sound.** Press **Tune in**: listening is each
-  node's own choice, and a browser lets a page make sound only after a click in it.
-- **Jam says `Not connected to a room`, or `Nobody else is connected here yet`.** Music is
-  added to a room, for whoever else is in it. Join one on the **Network** tab. With a room
-  and nobody else linked in it, music can still be added: whoever joins is sent the list,
-  and fetches the audio from this node.
-- **A track in jam says `nobody here has it`.** Its audio is held by whoever added it and
-  by everyone who has played it since. If they have all left or reloaded, the entry is
-  still in the list and its audio is gone, so it cannot be played and the room skips it:
-  remove it and add the file again. It also comes back when a radio with its file in its
-  directory is in the room, whoever added it: so restarting a radio brings back what it
-  added.
-- **A dropped `.skb` is refused, or a peer's Offer never shows up.** The notice says
-  why, and for an Offer the reason is in the App tab's **Diagnostics**. Either the
-  bundle failed verification ("not a valid app bundle"), or it is not an app this shell
-  runs (`appFacts` in `browser/app-api.js`): its manifest has no `shell` entry, it was
-  built for another contract version, or it reaches something the shell grants no app.
-- **An install fails with `this node already holds its 8 app slots`.** A node holds eight
-  bundles, and the transport and the shell app are two of them. Remove an app
-  to install another.
-- **An app's message never leaves, and Diagnostics says it `does not claim` a protocol.**
-  An app sends only under the protocols in its own `protocols`. Add the one it sends under
-  there, which also makes it the app that receives it on this node.
+- **`npm run e2e` finds no browser.** Set `E2E_BROWSER` to the path of Chrome, Edge or
+  Chromium.
+- **Peers never appear.** Both tabs need the same relay URL and the same room.
+- **The relay reads as unreachable, but it is running.** It is private: enter its secret
+  in **Relay secret**.
+- **A contact shows `no answer`.** It is offline, on another relay, or wants a contact
+  secret this node didn't present. Enter its secret on its row and **Connect**.
+- **A dropped `.skb` is refused, or an offer never shows.** The notice says why, and the
+  App tab's **Diagnostics** for an offer: it failed verification, or it is not an app this
+  shell runs (no `shell` entry, another contract version, or it reaches something no app
+  is granted).
+- **`this node already holds its 8 app slots`.** Remove an app to install another.
+- **A button in a view does nothing, or a font or image is missing.** Views run with no
+  network and no inline handlers; see [The view](docs/APPS.md#3-the-view-uihtml).
+- **Jam shows what is playing, with no sound.** Press **Tune in**.
+- **A track in jam says `nobody here has it`.** Whoever held its audio has left. Remove it
+  and add the file again, or start a radio with the file in its directory.
